@@ -2,6 +2,9 @@
 #define GAME_MAIN_HPP
 
 #include <Engine/game.hpp>
+#include <Engine/camera/camera.hpp>
+#include <Engine/camera/cameraController.hpp>
+
 #include "Player.hpp"
 
 class GameMain : public Game {

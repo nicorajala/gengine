@@ -349,6 +349,106 @@ void ShapeGenerator::createSphere(float radius, int segments, int rings, std::ve
     }
 }
 
+void ShapeGenerator::createCone(const Vec3d& baseCenter, const Vec3d& tip, float baseRadius, int segments, std::vector<Vertex>& outVertices, std::vector<unsigned int>& outIndices) {
+    if (segments < 3) segments = 3;
+
+    Vec3d dir = (tip - baseCenter).normalized();
+
+    Vec3d up(0, 1, 0);
+    if (absf(dir.dot(up)) > 0.99f) up = Vec3d(1, 0, 0);
+
+    Vec3d side = dir.cross(up).normalized();
+    Vec3d up2 = side.cross(dir).normalized();
+
+    // precompute ring points and u coords
+    std::vector<Vec3d> ring(segments);
+    std::vector<float> ucoords(segments);
+    for (int i = 0; i < segments; ++i) {
+        float theta = 2.0f * PI * (float)i / (float)segments;
+        float c = cosf(theta);
+        float s = sinf(theta);
+        Vec3d radial = side * c + up2 * s;
+        radial = radial.normalized();
+        ring[i] = baseCenter + radial * baseRadius;
+        ucoords[i] = (float)i / (float)segments;
+    }
+
+    Vec3d color = {1,1,1};
+
+    // SIDES (flat-shaded): each triangle gets its own vertices with the triangle normal
+    for (int i = 0; i < segments; ++i) {
+        int ni = (i + 1) % segments;
+
+        // compute triangle normal (tip, ring[i], ring[ni])
+        Vec3d v0 = tip;
+        Vec3d v1 = ring[i];
+        Vec3d v2 = ring[ni];
+        Vec3d triN = (v1 - v0).cross(v2 - v0);
+        Vec3d triNormal = triN.normalized();
+
+        // choose winding so normal points outward (compare with radial direction)
+        float outwardTest = triN.dot((ring[i] - baseCenter));
+        unsigned int startIndex = outVertices.size();
+
+        if (outwardTest >= 0.0f) {
+            // tip, ring[i], ring[ni]
+            outVertices.push_back(Vertex(v0, color, triNormal, Vec2d(0.5f, 1.0f)));
+            outVertices.push_back(Vertex(v1, color, triNormal, Vec2d(ucoords[i], 0.0f)));
+            outVertices.push_back(Vertex(v2, color, triNormal, Vec2d(ucoords[ni], 0.0f)));
+
+            outIndices.push_back(startIndex);
+            outIndices.push_back(startIndex+1);
+            outIndices.push_back(startIndex+2);
+        } else {
+            // flipped winding
+            outVertices.push_back(Vertex(v0, color, -triNormal, Vec2d(0.5f, 1.0f)));
+            outVertices.push_back(Vertex(v2, color, -triNormal, Vec2d(ucoords[ni], 0.0f)));
+            outVertices.push_back(Vertex(v1, color, -triNormal, Vec2d(ucoords[i], 0.0f)));
+
+            outIndices.push_back(startIndex);
+            outIndices.push_back(startIndex+1);
+            outIndices.push_back(startIndex+2);
+        }
+    }
+
+    // BASE CAP: fan triangles around baseCenter, normal should point opposite to dir
+    Vec3d capNormal = dir * -1.0f;
+    Vec2d centerUV = {0.5f, 0.5f};
+    unsigned int capCenterIndex = outVertices.size();
+    outVertices.push_back(Vertex(baseCenter, color, capNormal, centerUV));
+
+    // push ring verts for cap with capNormal and cap UVs
+    for (int i = 0; i < segments; ++i) {
+        Vec3d r_i = ring[i] - baseCenter;
+        Vec2d uv_i = Vec2d( 0.5f + 0.5f * (r_i.dot(side) / baseRadius),  0.5f + 0.5f * (r_i.dot(up2) / baseRadius) );
+        outVertices.push_back(Vertex(ring[i], color, capNormal, uv_i));
+    }
+
+    // indices for cap: ensure winding matches capNormal
+    for (int i = 0; i < segments; ++i) {
+        int ni = (i + 1) % segments;
+        unsigned int ring_i_index = capCenterIndex + 1 + i;
+        unsigned int ring_ni_index = capCenterIndex + 1 + ni;
+
+        // triangle (center, ring_ni, ring_i) should produce normal close to capNormal
+        Vec3d v0c = baseCenter;
+        Vec3d v1c = ring[ni];
+        Vec3d v2c = ring[i];
+        Vec3d triNc = (v1c - v0c).cross(v2c - v0c);
+
+        if (triNc.dot(capNormal) >= 0.0f) {
+            outIndices.push_back(capCenterIndex);
+            outIndices.push_back(ring_ni_index);
+            outIndices.push_back(ring_i_index);
+        } else {
+            // flip ring order
+            outIndices.push_back(capCenterIndex);
+            outIndices.push_back(ring_i_index);
+            outIndices.push_back(ring_ni_index);
+        }
+    }
+}
+
 unsigned int loadTexture(const char* path) {
     unsigned int textureID;
     glGenTextures(1, &textureID);

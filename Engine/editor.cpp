@@ -1,10 +1,17 @@
 #include "Engine/editor.hpp"
+#include <algorithm>
+#include <cctype>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 Editor::Editor(SDL_Window* w, GameMain* g, float& width)
     : window(w), game(g), editorWidth(width), viewportTexture(0), viewportTexW(0), viewportTexH(0),
       viewportHovered(false), viewportMouseU(0.0f), viewportMouseV(0.0f), viewportMouseDown(false),
       currentProjectPath(""), selectedFile(""), objectCount(0), renaming(false),
-      showBuildWindow(false), sceneFiles(), sceneSel(), buildMessage(), invokeCMakeBuild(true), selectedFolder()
+      showBuildWindow(false), sceneFiles(), sceneSel(), buildMessage(), invokeCMakeBuild(true), selectedFolder(),
+	showPreferences(false), showShadowView(false), shadowPreviewSize(128)
 {
     // initialize arrays
     pos[0]=pos[1]=pos[2]=0.0f;
@@ -13,9 +20,46 @@ Editor::Editor(SDL_Window* w, GameMain* g, float& width)
     nameBuffer[0] = '\0';
 
     glShaderType = 0;
+
+    externalEditorPath[0] = '\0';
+    LoadPreferences();
 }
 
-Editor::~Editor() {}
+Editor::~Editor() {
+    if (!shadowPreviewTex.empty()) {
+        glDeleteTextures((GLsizei)shadowPreviewTex.size(), shadowPreviewTex.data());
+        shadowPreviewTex.clear();
+    }
+}
+
+static inline std::string toLower(const std::string& s) {
+    std::string r = s;
+    std::transform(r.begin(), r.end(), r.begin(), [](unsigned char c){ return std::tolower(c); });
+    return r;
+}
+
+void Editor::ensurePreviewTextures(size_t count) {
+    if (shadowPreviewTex.size() == count) return;
+
+    // free old
+    if (!shadowPreviewTex.empty()) {
+        glDeleteTextures((GLsizei)shadowPreviewTex.size(), shadowPreviewTex.data());
+        shadowPreviewTex.clear();
+    }
+
+    if (count == 0) return;
+
+    shadowPreviewTex.resize(count, 0);
+    glGenTextures((GLsizei)count, shadowPreviewTex.data());
+    for (size_t i = 0; i < count; ++i) {
+        glBindTexture(GL_TEXTURE_2D, shadowPreviewTex[i]);
+        // allocate a small preview texture (we'll upload float red channel data)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, shadowPreviewSize, shadowPreviewSize, 0, GL_RED, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+}
 
 void Editor::Update() {
     int wW, wH; SDL_GetWindowSize(window, &wW, &wH);
@@ -44,6 +88,8 @@ void Editor::Update() {
 
     ImGui::End();
 
+    drawShadowView();
+
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::Begin("Viewport", NULL, ImGuiWindowFlags_NoCollapse);
     ImGui::PopStyleVar();
@@ -51,41 +97,91 @@ void Editor::Update() {
     ImGui::BeginChild("SceneToolbar", ImVec2(0, 28), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     {
         if (ImGui::Button("Play")) {
-            std::string tmpScene;
-            if (currentProjectPath.empty()) {
-                char cwd[4096];
-                if (getcwd(cwd, sizeof(cwd)) != NULL) tmpScene = std::string(cwd) + "/tmp_play_scene.gscene";
-                else tmpScene = std::string("./tmp_play_scene.gscene");
-            } else {
-                tmpScene = currentProjectPath + std::string("/tmp_play_scene.gscene");
-            }
-            game->scene->saveScene(tmpScene);
-            printf("[Editor] Saved play-scene to '%s'\n", tmpScene.c_str());
+            // create and save temporary scene path (use native separators)
+            fs::path tmpScenePath = currentProjectPath.empty()
+                                        ? fs::path(fs::current_path()) / "tmp_play_scene.gscene"
+                                        : fs::path(currentProjectPath) / "tmp_play_scene.gscene";
+            tmpScenePath = fs::path(tmpScenePath);
+            game->scene->saveScene(tmpScenePath.string());
+            std::cerr << "[Editor] Saved play-scene to '" << tmpScenePath.string() << "'\n";
 
-            // Candidate executable names (prefer installed/packaged name first)
-            const char* candidates[] = {"GENGINE", "gengine", "gengine-player", "./GENGINE", "./gengine", NULL};
-            std::string exePath;
+            // search for a runnable player executable in a few sensible places
+            std::vector<fs::path> lookPaths = {
+                fs::path(fs::current_path()) / "GENGINE",
+                fs::path(fs::current_path()) / "GENGINE.exe",
+            };
+
+            // also try base path (where the editor exe lives) and common build output folders
             char* base = SDL_GetBasePath();
             if (base) {
-                for (int i = 0; candidates[i]; ++i) {
-                    std::string cand = std::string(base) + candidates[i];
-                    if (fs::exists(cand)) { exePath = cand; break; }
-                }
+                fs::path basePath(base);
+                lookPaths.push_back(basePath / "GENGINE.exe");
                 SDL_free(base);
             }
-            if (exePath.empty()) {
-                for (int i = 0; candidates[i]; ++i) {
-                    std::string cand = std::string(candidates[i]);
-                    if (fs::exists(cand)) { exePath = cand; break; }
+
+            lookPaths.push_back(fs::path(fs::current_path()) / "build" / "GENGINE.exe");
+            lookPaths.push_back(fs::path(fs::current_path()) / "build" / "x64-Debug" / "GENGINE.exe");
+            lookPaths.push_back(fs::path(fs::current_path()) / "build" / "x64-Release" / "GENGINE.exe");
+
+            fs::path foundExe;
+            for (auto &p : lookPaths) {
+                if (!p.string().empty() && fs::exists(p) && fs::is_regular_file(p)) { foundExe = p; break; }
+            }
+
+            // last resort: try to find any file in cwd containing "GENGINE" or "GENGINE_PLAYER"
+            if (foundExe.string().empty()) {
+                for (auto &entry : fs::directory_iterator(fs::current_path())) {
+                    if (!entry.is_regular_file()) continue;
+                    std::string name = entry.path_().filename().string();
+                    if (name.find("GENGINE") != std::string::npos || name.find("GENGINE_PLAYER") != std::string::npos) {
+                        foundExe = entry.path_();
+                        break;
+                    }
                 }
             }
-            if (exePath.empty()) exePath = std::string("GENGINE.exe");
 
-            std::string cmd = std::string("\"") + exePath + "\" --game --scene \"" + tmpScene + "\"";
-            printf("[Editor] Launching: %s\n", cmd.c_str());
-            int r = system(cmd.c_str());
-            printf("[Editor] launch returned %d\n", r);
-            (void)r;
+            if (foundExe.string().empty()) {
+                std::cerr << "[Editor] Play failed: no player executable found. Set the player path or build the player.\n";
+#if defined(_WIN32)
+                MessageBoxA(NULL, "No player executable found. Build the player or set the path and try again.", "Play Error", MB_OK | MB_ICONERROR);
+#endif
+            } else {
+                // build a safe command line and launch
+                std::string exePath = fs::path(foundExe).string();
+                std::string scenePath = tmpScenePath.string();
+                std::cerr << "[Editor] Launching: " << exePath << " --game --scene " << scenePath << std::endl;
+
+#if defined(_WIN32)
+                std::string cmdLine = "\"" + exePath + "\" --game --scene \"" + scenePath + "\"";
+                STARTUPINFOA si;
+                PROCESS_INFORMATION pi;
+                ZeroMemory(&si, sizeof(si));
+                si.cb = sizeof(si);
+                ZeroMemory(&pi, sizeof(pi));
+
+                // CreateProcess modifies the command line buffer, so give it a writable one
+                std::vector<char> cmdBuf(cmdLine.begin(), cmdLine.end());
+                cmdBuf.push_back('\0');
+
+                BOOL ok = CreateProcessA(NULL, cmdBuf.data(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+                if (ok) {
+                    // detach handles so the editor doesn't wait on the child
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                    std::cerr << "[Editor] Launch succeeded\n";
+                } else {
+                    DWORD err = GetLastError();
+                    std::cerr << "[Editor] CreateProcess failed, error=" << err << std::endl;
+                    MessageBoxA(NULL, "Failed to launch player executable. See console for details.", "Launch Error", MB_OK | MB_ICONERROR);
+                }
+#else
+                std::string cmd = std::string("\"") + exePath + "\" --game --scene \"" + scenePath + "\"";
+                std::cerr << "[Editor] Launching (shell): " << cmd << std::endl;
+                int r = std::system(cmd.c_str());
+                std::cerr << "[Editor] launch returned " << r << std::endl;
+                (void)r;
+#endif
+            }
         }
         ImGui::SameLine();
         ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
@@ -102,39 +198,42 @@ void Editor::Update() {
             glShaderType = 1;
             std::cerr << "[Editor] Shader mode switched to: UNLIT" << std::endl;
         }
+
+        ImGui::SameLine();
+        if (ImGui::Button("wireframe")) {
+            glShaderType = 2;
+			std::cerr << "[Editor] Shader mode switched to: WIREFRAME" << std::endl;
+        }
+
+        ImGui::SameLine(); 
+        ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+		ImGui::SameLine();
+
+        if (game && game->scene) {
+            ImGui::SameLine();
+            ImGui::Checkbox("Colliders", &game->scene->drawColliders);
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("realtime")) {
+            isRealtime = !isRealtime;
+
+            std::cerr << "[Editor] Realtime mode: " << (isRealtime ? "ON" : "OFF") << std::endl;
+        }
+
+        if (isRealtime) {
+            LAST = NOW;
+            NOW = SDL_GetTicks();
+            deltaTime = (NOW - LAST) / 1000.0f;
+
+            game->Update(deltaTime);
+        }
     }
     ImGui::EndChild();
 
-    if (viewportTexture != 0) {
-        ImVec2 avail = ImGui::GetContentRegionAvail();
-        float aspect = (viewportTexW > 0 && viewportTexH > 0) ? (float)viewportTexW / (float)viewportTexH : (16.0f/9.0f);
-        float width = avail.x;
-        float height = width / aspect;
-        if (height > avail.y) { height = avail.y; width = height * aspect; }
-            ImVec2 uv0 = ImVec2(0.0f, 1.0f);
-            ImVec2 uv1 = ImVec2(1.0f, 0.0f);
-            ImGui::Image((ImTextureID)(intptr_t)viewportTexture, ImVec2(width, height), uv0, uv1);
+    Viewport::DrawViewport(viewportTexture, viewportTexW, viewportTexH,
+        viewportHovered, viewportMouseU, viewportMouseV, viewportMouseDown);
 
-            ImGuiIO& io = ImGui::GetIO();
-            ImVec2 imgMin = ImGui::GetItemRectMin();
-            ImVec2 imgMax = ImGui::GetItemRectMax();
-            ImVec2 mousePos = io.MousePos;
-            // Check hover
-            viewportHovered = (mousePos.x >= imgMin.x && mousePos.x <= imgMax.x && mousePos.y >= imgMin.y && mousePos.y <= imgMax.y);
-            if (viewportHovered) {
-                float localX = mousePos.x - imgMin.x;
-                float localY = mousePos.y - imgMin.y;
-                float w = imgMax.x - imgMin.x;
-                float h = imgMax.y - imgMin.y;
-                viewportMouseU = localX / w;
-                viewportMouseV = 1.0f - (localY / h);
-                viewportMouseDown = ImGui::IsMouseDown(0);
-            } else {
-                viewportMouseDown = false;
-            }
-    } else {
-        ImGui::Text("No viewport texture available");
-    }
     ImGui::End();
 }
 
@@ -169,8 +268,39 @@ void Editor::MainMenu() {
 
             ImGui::EndMenu();
         }
+
+        if (ImGui::BeginMenu("Edit")) {
+            if (ImGui::MenuItem("Preferences")) {
+                showPreferences = true;
+            }
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("View")) {
+            ImGui::MenuItem("Shadows", NULL, &showShadowView);
+            ImGui::EndMenu();
+        }
     }
     ImGui::EndMainMenuBar();
+
+    // Preferences window
+    if (showPreferences) {
+        ImGui::SetNextWindowSize(ImVec2(520, 220), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Preferences", &showPreferences)) {
+            ImGui::TextWrapped("Configure external editor used to open source files.");
+            ImGui::InputText("External Editor Path", externalEditorPath, IM_ARRAYSIZE(externalEditorPath));
+            ImGui::TextDisabled("Examples: C:\\\\Program Files\\\\VSCode\\\\Code.exe  or /usr/bin/code");
+            if (ImGui::Button("Save")) {
+                SavePreferences();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Clear")) {
+                externalEditorPath[0] = '\0';
+                SavePreferences();
+            }
+            ImGui::End();
+        }
+    }
 
     if (showBuildWindow) {
         ImGui::SetNextWindowSize(ImVec2(520, 420), ImGuiCond_FirstUseEver);
@@ -354,6 +484,90 @@ void Editor::MainMenu() {
     }
 }
 
+void Editor::drawShadowView() {
+    if (!showShadowView) return;
+
+    ImGui::SetNextWindowSize(ImVec2(420, 300), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Shadows", &showShadowView)) {
+        ImGui::End();
+        return;
+    }
+
+    SceneManager* scene = (game ? game->scene : nullptr);
+    if (!scene) {
+        ImGui::Text("No scene available");
+        ImGui::End();
+        return;
+    }
+
+    size_t shadowCount = scene->lightShadows.size();
+    ensurePreviewTextures(shadowCount);
+
+    // For each directional light's shadow, read depth texture and upload into preview texture
+    for (size_t i = 0; i < shadowCount; ++i) {
+        Shadow* sh = scene->lightShadows[i];
+        if (!sh) continue;
+
+        // read depth image from shadow texture (may be large) -- read into CPU then upload resized float red texture.
+        // This is a debug path — it's fine for interactive use but not optimized.
+        GLint oldTex = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTex);
+        glBindTexture(GL_TEXTURE_2D, sh->getDepthTexture());
+
+        // read full depth image
+        int w = sh->SHADOW_SIZE;
+        int h = sh->SHADOW_SIZE;
+        std::vector<float> depthData;
+        depthData.resize((size_t)w * (size_t)h);
+        // Make sure correct alignment
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_FLOAT, depthData.data());
+
+        // Downsample CPU -> preview size (simple box average)
+        int pw = shadowPreviewSize;
+        int ph = shadowPreviewSize;
+        std::vector<float> preview;
+        preview.resize((size_t)pw * (size_t)ph);
+        // naive downsample
+        for (int py = 0; py < ph; ++py) {
+            for (int px = 0; px < pw; ++px) {
+                // map preview pixel to source region
+                float sx0f = (float)px * (float)w / (float)pw;
+                float sy0f = (float)py * (float)h / (float)ph;
+                float sx1f = (float)(px + 1) * (float)w / (float)pw;
+                float sy1f = (float)(py + 1) * (float)h / (float)ph;
+                int sx0 = (int)floor(sx0f);
+                int sy0 = (int)floor(sy0f);
+                int sx1 = (int)min((float)w, ceil(sx1f));
+                int sy1 = (int)min((float)h, ceil(sy1f));
+                float sum = 0.0f;
+                int cnt = 0;
+                for (int sy = sy0; sy < sy1; ++sy) {
+                    for (int sx = sx0; sx < sx1; ++sx) {
+                        sum += depthData[sy * w + sx];
+                        ++cnt;
+                    }
+                }
+                float val = (cnt > 0) ? (sum / (float)cnt) : 1.0f;
+                preview[py * pw + px] = val;
+            }
+        }
+
+        // upload preview into preview texture (R32F)
+        glBindTexture(GL_TEXTURE_2D, shadowPreviewTex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, pw, ph, 0, GL_RED, GL_FLOAT, preview.data());
+        glBindTexture(GL_TEXTURE_2D, oldTex);
+
+        // display preview
+        ImGui::Text("Light %zu (type=%s)  tex=%u", i,
+            (scene->lights[i].type == LightType::Directional) ? "Directional" : "Point",
+            sh->getDepthTexture());
+        ImGui::Image((void*)(intptr_t)shadowPreviewTex[i], ImVec2(256, 256));
+        ImGui::Separator();
+    }
+
+    ImGui::End();
+}
+
 void Editor::EditorGUI() {
     int wW, wH; SDL_GetWindowSize(window, &wW, &wH);
     ImGui::Begin("Editor", nullptr, ImGuiWindowFlags_NoCollapse);
@@ -367,11 +581,16 @@ void Editor::EditorGUI() {
 
             ImGui::InputFloat3("Position", pos, "%.2f");
             ImGui::InputFloat3("Rotation", rot, "%.2f");
-            ImGui::InputFloat3("Scale", scale, "%.2f");
+            if (ImGui::InputFloat3("Scale", scale, "%.2f")) {
+                // user edited scale -> apply and recreate collider to match new scale
+                obj->scale = Vec3d(scale[0], scale[1], scale[2]);
+                if (game && game->scene) {
+                    game->scene->recreatePhysicsBody(obj);
+                }
+            }
 
             obj->position = Vec3d(pos[0],pos[1],pos[2]);
             obj->rotation = Vec3d(rot[0],rot[1],rot[2]);
-            obj->scale = Vec3d(scale[0],scale[1],scale[2]);
         }
 
         if (ImGui::CollapsingHeader("Texture", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -380,20 +599,32 @@ void Editor::EditorGUI() {
                 if (fs::exists((std::string)texPath)) obj->texture(texPath);
             }
             if (obj->textureID) ImGui::Image((void*)(intptr_t)obj->textureID, ImVec2(128,128));
+
+            bool col = obj->collisionEnabled;
+            if (ImGui::Checkbox("Collision", &col)) {
+                obj->collisionEnabled = col;
+                if (game && game->scene) game->scene->recreatePhysicsBody(obj);
+            }
         }
     } 
     if (game->scene->selectedLightIndex >= 0) {
         Light& l = game->scene->lights[game->scene->selectedLightIndex];
         float pos[3] = { l.position.x, l.position.y, l.position.z };
         float col[3] = { l.color.x, l.color.y, l.color.z };
+		float dir[3] = { l.direction.x, l.direction.y, l.direction.z };
         float intensity = l.intensity;
         if (ImGui::CollapsingHeader("Light Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::InputFloat3("Position", pos);
+            if (l.type == LightType::Directional) {
+                ImGui::InputFloat3("Direction", dir);
+            } else {
+                ImGui::InputFloat3("Position", pos);
+            }
             ImGui::ColorEdit3("Color", col);
             ImGui::InputFloat("Intensity", &intensity);
             l.position = Vec3d(pos[0], pos[1], pos[2]);
             l.color = Vec3d(col[0], col[1], col[2]);
             l.intensity = intensity;
+            l.direction = Vec3d(dir[0], dir[1], dir[2]);
         }
     }
 
@@ -446,13 +677,7 @@ void Editor::SceneGUI() {
             if (ImGui::MenuItem("Sphere")) game->scene->addObject("Sphere", "Sphere_" + std::to_string(objectCount++));
             if (ImGui::MenuItem("Plane")) game->scene->addObject("Plane", "Plane_" + std::to_string(objectCount++));
             if (ImGui::MenuItem("Pyramid")) game->scene->addObject("Pyramid", "Pyramid_" + std::to_string(objectCount++));
-            if (ImGui::MenuItem("Player Start")) {
-                // create a small cube to act as player start and give it a reserved name
-                Object* ps = game->scene->addObject("Cube", "PlayerStart");
-                if (ps) {
-                    ps->scale = Vec3d(0.5f);
-                }
-            }
+            if (ImGui::MenuItem("Cone")) game->scene->addObject("Cone", "Cone_" + std::to_string(objectCount++));
             if(ImGui::BeginMenu("Light")) {
                 if(ImGui::MenuItem("Point Light")) {
                     Light dirLight(LightType::Point, Vec3d(0,0,0), 1.0f);
@@ -508,34 +733,67 @@ void Editor::ProjectGUI() {
         }
     }
 
+    // draw tree: show directories and files (files as leaf Selectable)
     std::function<void(const fs::path&)> drawTree = [&](const fs::path& dir) {
         for (auto& entry : fs::directory_iterator(dir)) {
-            if (!entry.is_directory()) continue;
-            std::string name = entry.getpath().filename().string();
-
-            // Tree node
-            ImGuiTreeNodeFlags node_flags = ((selectedFolder == entry.getpath().string()) ? ImGuiTreeNodeFlags_Selected : 0);
-            bool node_open = ImGui::TreeNodeEx(name.c_str(), node_flags);
-            if (ImGui::IsItemClicked()) selectedFolder = entry.getpath();
-            if (node_open) {
-                drawTree(entry.getpath());
-                ImGui::TreePop();
-            }
-
-            if (ImGui::BeginPopupContextItem()) {
-                if (ImGui::MenuItem("New Folder")) {
-                    fs::create_directory(entry.getpath() / "NewFolder");
+            // show directories as nodes
+            if (entry.is_directory()) {
+                std::string name = entry.getpath().filename().string();
+                ImGuiTreeNodeFlags node_flags = ((selectedFolder == entry.getpath().string()) ? ImGuiTreeNodeFlags_Selected : 0)
+                                               | ImGuiTreeNodeFlags_OpenOnArrow;
+                bool node_open = ImGui::TreeNodeEx(name.c_str(), node_flags);
+                if (ImGui::IsItemClicked()) selectedFolder = entry.getpath().string();
+                if (node_open) {
+                    drawTree(entry.getpath());
+                    ImGui::TreePop();
                 }
-                if (ImGui::MenuItem("New C++ Class")) {
-                    std::string className = "NewClass";
-                    std::ofstream header(entry.getpath() / (className + ".hpp"));
-                    header << "#pragma once\n\nclass " << className << " {};\n";
-                    header.close();
-                    std::ofstream source(entry.getpath() / (className + ".cpp"));
-                    source << "#include \"" << className << ".hpp\"\n";
-                    source.close();
+
+                if (ImGui::BeginPopupContextItem()) {
+                    if (ImGui::MenuItem("New Folder")) {
+                        fs::create_directory(entry.getpath() / "NewFolder");
+                    }
+                    if (ImGui::MenuItem("New C++ Class")) {
+                        std::string className = "NewClass";
+                        std::ofstream header(entry.getpath() / (className + ".hpp"));
+                        header << "#pragma once\n\nclass " << className << " {};\n";
+                        header.close();
+                        std::ofstream source(entry.getpath() / (className + ".cpp"));
+                        source << "#include \"" << className << ".hpp\"\n";
+                        source.close();
+                    }
+                    ImGui::EndPopup();
                 }
-                ImGui::EndPopup();
+            } else {
+                // file - show selectable leaf (double-click to open/load)
+                std::string fname = entry.getpath().filename().string();
+                bool sel = (selectedFile == entry.getpath().string());
+                if (ImGui::Selectable(fname.c_str(), sel)) {
+                    selectedFile = entry.getpath().string();
+                }
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    // handle double-click open
+                    std::string ext = toLower(entry.getpath().string());
+                    if (ext == ".gscene") {
+                        game->scene->loadScene(entry.getpath().string());
+                    } else {
+                        // open in external editor if configured, otherwise use OS default
+                        std::string fpath = entry.getpath().string();
+                        std::string cmd;
+                        if (externalEditorPath[0] != '\0') {
+                            cmd = std::string("\"") + std::string(externalEditorPath) + "\" \"" + fpath + "\"";
+                        } else {
+#if defined(_WIN32)
+                            cmd = "start \"\" \"" + fpath + "\"";
+#elif defined(__APPLE__)
+                            cmd = "open \"" + fpath + "\"";
+#else
+                            cmd = "xdg-open \"" + fpath + "\"";
+#endif
+                        }
+                        int r = system(cmd.c_str());
+                        (void)r;
+                    }
+                }
             }
         }
     };
@@ -564,7 +822,35 @@ void Editor::ProjectGUI() {
             bool isDir = entry.is_directory();
 
             if (isDir) ImGui::TextDisabled("[Folder] %s", name.c_str());
-            else ImGui::Selectable(name.c_str(), selectedFile == entry.getpath().string());
+            else {
+                bool sel = (selectedFile == entry.getpath().string());
+                if (ImGui::Selectable(name.c_str(), sel)) {
+                    selectedFile = entry.getpath().string();
+                }
+                // double-click behavior in list panel as well
+                if (!isDir && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    std::string ext = toLower(entry.getpath().string());
+                    if (ext == ".gscene") {
+                        game->scene->loadScene(entry.getpath().string());
+                    } else {
+                        std::string fpath = entry.getpath().string();
+                        std::string cmd;
+                        if (externalEditorPath[0] != '\0') {
+                            cmd = std::string("\"") + std::string(externalEditorPath) + "\" \"" + fpath + "\"";
+                        } else {
+#if defined(_WIN32)
+                            cmd = "start \"\" \"" + fpath + "\"";
+#elif defined(__APPLE__)
+                            cmd = "open \"" + fpath + "\"";
+#else
+                            cmd = "xdg-open \"" + fpath + "\"";
+#endif
+                        }
+                        int r = system(cmd.c_str());
+                        (void)r;
+                    }
+                }
+            }
 
             if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("DND_FILE", entry.getpath().string().c_str(),
@@ -596,10 +882,36 @@ void Editor::ProjectGUI() {
     ImGui::End();
 }
 
-
 void Editor::SaveScene() { 
     game->scene->saveScene(currentProjectPath+"/scene.gscene");
 }
 void Editor::LoadScene() {
     game->scene->loadScene(currentProjectPath+"/scene.gscene");
+}
+
+// Preferences persistence (very small key=value file in cwd)
+void Editor::SavePreferences() {
+    try {
+        std::ofstream f("editor_prefs.cfg", std::ios::out | std::ios::trunc);
+        if (!f.is_open()) return;
+        f << "external_editor=" << externalEditorPath << "\n";
+        f.close();
+    } catch (...) {}
+}
+
+void Editor::LoadPreferences() {
+    try {
+        std::ifstream f("editor_prefs.cfg");
+        if (!f.is_open()) return;
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.rfind("external_editor=", 0) == 0) {
+                std::string val = line.substr(strlen("external_editor="));
+                size_t n = min((size_t)val.size(), sizeof(externalEditorPath)-1);
+                memcpy(externalEditorPath, val.c_str(), n);
+                externalEditorPath[n] = '\0';
+            }
+        }
+        f.close();
+    } catch (...) {}
 }

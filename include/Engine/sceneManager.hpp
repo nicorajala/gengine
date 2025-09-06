@@ -5,6 +5,7 @@
 #include "Engine/lighting/light.hpp"
 #include "Engine/lighting/shadow.hpp"
 #include "Engine/gizmos/transformTool.hpp"
+#include "Engine/physics/physics.hpp" // ensure physics types visible
 
 #include "glad/glad.h"
 #include "nlohmann/json.hpp"
@@ -94,6 +95,15 @@ public:
     void saveScene(const std::string& path);
     void loadScene(const std::string& path);
 
+    // Debug: draw wireframe representation of collision shapes when true
+    bool drawColliders = false;
+
+    // Ensure a physics body matches the current object (recreate with current scale/type/position).
+    // Call after you change position/scale/type manually.
+    void recreatePhysicsBody(Object* obj);
+
+    // owned physics world
+    Physics::World physics;
 private:
     GLuint gridVAO = 0, gridVBO = 0;
     int gridVertexCount = 0;

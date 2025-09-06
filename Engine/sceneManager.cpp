@@ -4,11 +4,27 @@
 #include "Engine/util/shaderc.hpp"
 #include <sys/stat.h>
 
+// Helper function to get the position of a physics body.
+// Place this at the top of Engine/sceneManager.cpp (after includes, before usage).
+static Vec3d getBodyPos(const Physics::RigidBody* b) {
+	if (!b) return Vec3d(0.0f, 0.0f, 0.0f);
+	// If the body has an associated owner object, read the owner's authoritative position.
+	if (b->owner) return b->owner->position;
+	// otherwise use the internal body position
+	return b->position;
+}
+#include <SDL2/SDL.h>
+
 extern int glShaderType;
 static GLuint s_unlitProgram = 0;
 static Shaderc s_shaderCompiler;
 static time_t s_unlitVertMtime = 0;
 static time_t s_unlitFragMtime = 0;
+
+// Added wireframe program + mtimes
+static GLuint s_wireProgram = 0;
+static time_t s_wireVertMtime = 0;
+static time_t s_wireFragMtime = 0;
 
 SceneManager::SceneManager()
 		: selectedObject(NULL),
@@ -24,14 +40,35 @@ SceneManager::SceneManager()
 			lightVAO(0), lightVBO(0),
 			selectedLightIndex(-1),
 			objCounter(0),
-			gridVAO(0), gridVBO(0), gridVertexCount(0)
+			gridVAO(0), gridVBO(0), gridVertexCount(0),
+			physics() // default construct world
 {
-
+	// Try relative path first (as before)
 	shadowDepthProgram = s_shaderCompiler.loadShader("shaders/shadows/shadow_depth_vert.glsl", "shaders/shadows/shadow_depth_frag.glsl");
-	if (shadowDepthProgram == 0) {
-		std::cerr << "[SceneManager] Failed to load shadow depth shader!" << std::endl;
-	} else {
+	if (shadowDepthProgram != 0) {
 		std::cerr << "[SceneManager] shadowDepthProgram id = " << shadowDepthProgram << std::endl;
+	} else {
+		// Fallback: try loading from exe base path (useful when working directory differs)
+		char* base = SDL_GetBasePath();
+		if (base) {
+			std::string basePath(base);
+			std::string v = basePath + "shaders/shadows/shadow_depth_vert.glsl";
+			std::string f = basePath + "shaders/shadows/shadow_depth_frag.glsl";
+			std::cerr << "[SceneManager] relative load failed; trying base path: " << basePath << std::endl;
+			shadowDepthProgram = s_shaderCompiler.loadShader(v.c_str(), f.c_str());
+			if (shadowDepthProgram != 0) {
+				std::cerr << "[SceneManager] shadowDepthProgram loaded from base path id = " << shadowDepthProgram << std::endl;
+			} else {
+				std::cerr << "[SceneManager] Failed to load shadow depth shader from base path: " << basePath << std::endl;
+			}
+			SDL_free(base);
+		} else {
+			std::cerr << "[SceneManager] Failed to load shadow depth shader and SDL_GetBasePath() returned NULL" << std::endl;
+		}
+
+		if (shadowDepthProgram == 0) {
+			std::cerr << "[SceneManager] Failed to load shadow depth shader!" << std::endl;
+		}
 	}
 }
 
@@ -339,12 +376,32 @@ Object* SceneManager::addObject(const std::string& type, const std::string& name
 	initMeshForType(obj, type);
 	obj->name = name;
 	objects.push_back(obj);
+
+	// attach physics body using bounding radius * average scale
+	double r = obj->boundingRadius();
+
+	// Special-case Plane: use a thin, static cylinder collider matching plane scale
+	if (type == "Plane") {
+		Physics::RigidBody* rb = physics.createBody(obj, true, 0.0, 0.0, obj->position, Physics::COLLIDER_PLANE, 0.0);
+		if (rb) {
+			rb->isStatic = true;
+			rb->planeY = obj->position.y;
+			rb->enabled = obj->collisionEnabled;
+		}
+		obj->physicsBody = rb;
+	} else {
+		Physics::RigidBody* rb = physics.createBody(obj, false, 1.0, r, obj->position, Physics::COLLIDER_SPHERE, 1.0);
+		obj->physicsBody = rb;
+	}
+
 	return obj;
 }
 
 void SceneManager::removeObject(Object* objPtr) {
 	for (std::vector<Object*>::iterator it = objects.begin(); it != objects.end(); ) {
 		if ((*it) == objPtr) {
+			// remove physics body first
+			physics.removeBody(objPtr);
 			it = objects.erase(it);
 		} else {
 			++it;
@@ -380,11 +437,20 @@ void SceneManager::addLight(const Light& light){
 	lightShadows.push_back(sh);
 }
 
-void SceneManager::update(float deltaTime) {}
+void SceneManager::update(float deltaTime) {
+	// step physics (clamp dt to a stable range)
+	const float maxStep = 1.0f / 30.0f;
+	float dt = std::min(deltaTime, maxStep);
+	physics.step(dt);
+}
 
 void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& projection) {
 	const char* unlitVertPath = "shaders/unlit/vertex.glsl";
 	const char* unlitFragPath = "shaders/unlit/fragment.glsl";
+
+	// wireframe shader paths
+	const char* wireVertPath = "shaders/wireframe/vertex.glsl";
+	const char* wireFragPath = "shaders/wireframe/fragment.glsl";
 
 	auto getMTime = [](const char* path)->time_t {
 		struct stat st;
@@ -392,6 +458,7 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 		return 0;
 	};
 
+	// hot-reload unlit shader when requested
 	if (glShaderType == 1) {
 		time_t vm = getMTime(unlitVertPath);
 		time_t fm = getMTime(unlitFragPath);
@@ -413,10 +480,38 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 		}
 	}
 
+	// hot-reload wireframe shader when requested
+	if (glShaderType == 2) {
+		time_t vm = getMTime(wireVertPath);
+		time_t fm = getMTime(wireFragPath);
+		if (s_wireProgram == 0 || vm != s_wireVertMtime || fm != s_wireFragMtime) {
+			if (s_wireProgram != 0) {
+				glDeleteProgram(s_wireProgram);
+				s_wireProgram = 0;
+			}
+			GLuint prog = s_shaderCompiler.loadShader(wireVertPath, wireFragPath);
+			if (prog != 0) {
+				s_wireProgram = prog;
+				s_wireVertMtime = vm;
+				s_wireFragMtime = fm;
+				std::cerr << "[SceneManager] Loaded wireframe shader id=" << prog << std::endl;
+			}
+			else {
+				std::cerr << "[SceneManager] Failed to load wireframe shader, falling back to lit." << std::endl;
+			}
+		}
+	}
+
 	// Detect depth-only pass (renderDepth calls scene->render with depthProgram)
 	bool depthPass = (shaderProgram == shadowDepthProgram);
 
-	GLuint activeProgram = (glShaderType == 1 && s_unlitProgram != 0 && !depthPass) ? s_unlitProgram : shaderProgram;
+	// choose active program: prefer unlit/wire when requested and available (but never during depth pass)
+	GLuint activeProgram = shaderProgram;
+	if (!depthPass) {
+		if (glShaderType == 1 && s_unlitProgram != 0) activeProgram = s_unlitProgram;
+		else if (glShaderType == 2 && s_wireProgram != 0) activeProgram = s_wireProgram;
+	}
+
 	glUseProgram(activeProgram);
 
 	// store for external users (grid/gizmo drawing callers)
@@ -515,6 +610,7 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 			std::string locDirs = std::string("dirLightDirs[") + idx + "]";
 			std::string locColors = std::string("dirLightColors[") + idx + "]";
 			std::string locInts = std::string("dirLightIntensities[") + idx + "]";
+
 			glUniform3fv(glGetUniformLocation(activeProgram, locDirs.c_str()), 1, &l.direction[0]);
 			glUniform3fv(glGetUniformLocation(activeProgram, locColors.c_str()), 1, &l.color[0]);
 			glUniform1f(glGetUniformLocation(activeProgram, locInts.c_str()), l.intensity);
@@ -524,6 +620,7 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 			std::string locPos = std::string("pointLightPositions[") + idx + "]";
 			std::string locCol = std::string("pointLightColors[") + idx + "]";
 			std::string locInt = std::string("pointLightIntensities[") + idx + "]";
+
 			glUniform3fv(glGetUniformLocation(activeProgram, locPos.c_str()), 1, &l.position[0]);
 			glUniform3fv(glGetUniformLocation(activeProgram, locCol.c_str()), 1, &l.color[0]);
 			glUniform1f(glGetUniformLocation(activeProgram, locInt.c_str()), l.intensity);
@@ -560,15 +657,197 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 			glUniform1i(glGetUniformLocation(activeProgram, "useOverrideColor"), 0);
 		}
 
+		// Ensure object has mesh data and GL resources before drawing
+		if (obj->vertices.empty() || obj->indices.empty()) {
+			std::cerr << "[SceneManager] Skipping object " << oi << " - empty mesh data\n";
+			continue;
+		}
+
+		// If VAO wasn't created (eg. object deserialized before GL resources were available)
+		// create GL resources now by calling setupMesh().
+		if (obj->VAO == 0) {
+			std::cerr << "[SceneManager] Lazy-initializing GL resources for object " << oi << "\n";
+			obj->setupMesh();
+			if (obj->VAO == 0) {
+				std::cerr << "[SceneManager] ERROR: setupMesh failed to create VAO for object " << oi << "\n";
+				continue;
+			}
+		}
+
 		glBindVertexArray(obj->VAO);
+
+		// If wireframe mode requested, draw mesh as lines (only for object geometry)
+		bool drewWireframe = false;
+		if (!depthPass && glShaderType == 2) {
+			// set polygon mode to line for object draw then restore
+			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+			// optionally set line width based on gizmoLineWidth or a constant
+			glLineWidth(1.0f);
+			drewWireframe = true;
+		}
+
 		glDrawElements(GL_TRIANGLES, (GLsizei)obj->indices.size(), GL_UNSIGNED_INT, 0);
+
+		if (drewWireframe) {
+			// restore fill mode
+			glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+		}
+
 		glBindVertexArray(0);
 	}
 
 	// If we were called as a depth pass, return now — do not draw gizmos, grid, or light gizmos into shadow maps.
-
 	if (depthPass) return;
 
+	// Debug: wireframe collider rendering
+	if (this->drawColliders) {
+		// ensure override color is used
+		GLint locUse = glGetUniformLocation(activeProgram, "useOverrideColor");
+		GLint locColor = glGetUniformLocation(activeProgram, "overrideColor");
+		if (locUse >= 0) glUniform1i(locUse, 1);
+		if (locColor >= 0) glUniform3f(locColor, 1.0f, 0.0f, 0.0f); // red
+
+		// helper to draw a ring (XZ plane) at given center and radius
+		auto drawRing = [&](const Vec3d& center, double radius, int segments = 28) {
+			if (radius <= 0.0) return;
+			std::vector<float> verts;
+			verts.reserve((size_t)segments * 3);
+			for (int i = 0; i < segments; ++i) {
+				double a = (double)i / (double)segments * (2.0 * M_PI);
+				float x = (float)(center.x + radius * std::cos(a));
+				float z = (float)(center.z + radius * std::sin(a));
+				float y = (float)center.y;
+				verts.push_back(x); verts.push_back(y); verts.push_back(z);
+			}
+			GLuint vao = 0, vbo = 0;
+			glGenVertexArrays(1, &vao);
+			glGenBuffers(1, &vbo);
+			glBindVertexArray(vao);
+			glBindBuffer(GL_ARRAY_BUFFER, vbo);
+			glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+			glEnableVertexAttribArray(0);
+			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+			// model = identity (we provided world coords)
+			Mat4 model = Mat4(1.0f);
+			glUniformMatrix4fv(glGetUniformLocation(activeProgram, "model"), 1, GL_FALSE, model.value_ptr());
+			glDrawArrays(GL_LINE_LOOP, 0, segments);
+			glDisableVertexAttribArray(0);
+			glBindVertexArray(0);
+			glDeleteBuffers(1, &vbo);
+			glDeleteVertexArrays(1, &vao);
+		};
+
+		// helper to draw cylinder wireframe (top/bottom rings + vertical lines)
+		auto drawCylinder = [&](const Vec3d& center, double radius, double height, int segments = 20) {
+			double half = height * 0.5;
+			Vec3d top(center.x, center.y + half, center.z);
+			Vec3d bottom(center.x, center.y - half, center.z);
+			// top and bottom rings
+			drawRing(top, radius, segments);
+			drawRing(bottom, radius, segments);
+
+			// vertical lines at a few sample angles
+			for (int i = 0; i < segments; i += std::max(1, segments/8)) {
+				double a = (double)i / (double)segments * (2.0 * M_PI);
+				float tx = (float)(center.x + radius * std::cos(a));
+				float tz = (float)(center.z + radius * std::sin(a));
+				float tyTop = (float)top.y;
+				float tyBottom = (float)bottom.y;
+				float lineVerts[6] = { tx, tyBottom, tz, tx, tyTop, tz };
+				GLuint vao = 0, vbo = 0;
+				glGenVertexArrays(1, &vao);
+				glGenBuffers(1, &vbo);
+				glBindVertexArray(vao);
+				glBindBuffer(GL_ARRAY_BUFFER, vbo);
+				glBufferData(GL_ARRAY_BUFFER, sizeof(lineVerts), lineVerts, GL_STATIC_DRAW);
+				glEnableVertexAttribArray(0);
+				glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+				Mat4 model = Mat4(1.0f);
+				glUniformMatrix4fv(glGetUniformLocation(activeProgram, "model"), 1, GL_FALSE, model.value_ptr());
+				glDrawArrays(GL_LINES, 0, 2);
+				glDisableVertexAttribArray(0);
+				glBindVertexArray(0);
+				glDeleteBuffers(1, &vbo);
+				glDeleteVertexArrays(1, &vao);
+			}
+		};
+
+		// helper to draw simple sphere wireframe using 3 rings (XZ, XY, YZ)
+		auto drawSphere = [&](const Vec3d& center, double radius, int segments = 24) {
+			// XZ ring at center.y
+			drawRing(center, radius, segments);
+			// XY ring (y changes) - draw as points, transform accordingly
+			{
+				std::vector<float> verts;
+				verts.reserve(segments * 3);
+				for (int i = 0; i < segments; ++i) {
+					double a = (double)i / (double)segments * (2.0 * M_PI);
+					float x = (float)(center.x + radius * std::cos(a));
+					float y = (float)(center.y + radius * std::sin(a));
+					float z = (float)center.z;
+					verts.push_back(x); verts.push_back(y); verts.push_back(z);
+				}
+				GLuint vao = 0, vbo = 0;
+				glGenVertexArrays(1, &vao);
+				glGenBuffers(1, &vbo);
+				glBindVertexArray(vao);
+				glBindBuffer(GL_ARRAY_BUFFER, vbo);
+				glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+				glEnableVertexAttribArray(0);
+				glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+				Mat4 model = Mat4(1.0f);
+				glUniformMatrix4fv(glGetUniformLocation(activeProgram, "model"), 1, GL_FALSE, model.value_ptr());
+				glDrawArrays(GL_LINE_LOOP, 0, segments);
+				glDisableVertexAttribArray(0);
+				glBindVertexArray(0);
+				glDeleteBuffers(1, &vbo);
+				glDeleteVertexArrays(1, &vao);
+			}
+			// YZ ring
+			{
+				std::vector<float> verts;
+			 verts.reserve(segments * 3);
+				for (int i = 0; i < segments; ++i) {
+					double a = (double)i / (double)segments * (2.0 * M_PI);
+					float z = (float)(center.z + radius * std::cos(a));
+					float y = (float)(center.y + radius * std::sin(a));
+					float x = (float)center.x;
+					verts.push_back(x); verts.push_back(y); verts.push_back(z);
+				}
+				GLuint vao = 0, vbo = 0;
+				glGenVertexArrays(1, &vao);
+				glGenBuffers(1, &vbo);
+				glBindVertexArray(vao);
+				glBindBuffer(GL_ARRAY_BUFFER, vbo);
+				glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+				glEnableVertexAttribArray(0);
+				glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+				Mat4 model = Mat4(1.0f);
+				glUniformMatrix4fv(glGetUniformLocation(activeProgram, "model"), 1, GL_FALSE, model.value_ptr());
+				glDrawArrays(GL_LINE_LOOP, 0, segments);
+				glDisableVertexAttribArray(0);
+				glBindVertexArray(0);
+				glDeleteBuffers(1, &vbo);
+				glDeleteVertexArrays(1, &vao);
+			}
+		};
+
+		// iterate over physics bodies and draw according to type
+		for (auto b : physics.bodies_) {
+			if (!b || !b->enabled) continue;
+			Vec3d center = getBodyPos(b);
+			if (b->colliderType == Physics::COLLIDER_CYLINDER) {
+				drawCylinder(center, b->radius, b->height);
+			} else {
+				drawSphere(center, b->radius);
+			}
+		}
+
+		// restore override uniform
+		if (locUse >= 0) glUniform1i(locUse, 0);
+	}
+
+	// draw gizmos, etc. (existing code continues)
 	if (selectedObject) {
 		glBindVertexArray(axisVAO);
 
@@ -738,6 +1017,8 @@ void SceneManager::saveScene(const std::string& path) {
 		o["rotation"] = rotArr;
 		o["scale"] = sclArr;
 		o["texturePath"] = obj->texturePath;
+		// persist collision flag (default true)
+		o["collision"] = obj->collisionEnabled;
 		j["objects"].push_back(o);
 	}
 
@@ -800,6 +1081,7 @@ void SceneManager::loadScene(const std::string& path) {
 			scl = Vec3d(objJson["scale"][0], objJson["scale"][1], objJson["scale"][2]);
 		}
 		std::string texPath = objJson.value("texturePath", "");
+		bool collision = objJson.value("collision", true);
 
 		Object* o = new Object();
 		o->name = name;
@@ -811,11 +1093,16 @@ void SceneManager::loadScene(const std::string& path) {
 		o->rotation = rot;
 		o->scale    = scl;
 
+		o->collisionEnabled = collision;
+
 		if (!texPath.empty()) {
 			o->texture(texPath);
 		}
 
 		objects.push_back(o);
+
+		// create physics body that matches the current transform/scale/type
+		recreatePhysicsBody(o);
 	}
 
 	if (j.find("lights") == j.end() || !j["lights"].is_array()) {
@@ -861,4 +1148,68 @@ void SceneManager::loadScene(const std::string& path) {
 		sh->farP = 60.0f;
 		lightShadows.push_back(sh);
 	}
+}
+
+void SceneManager::recreatePhysicsBody(Object* obj) {
+	if (!obj) return;
+
+	// remove existing body if any
+	if (obj->physicsBody) {
+		physics.removeBody(obj);
+		obj->physicsBody = nullptr;
+	}
+
+	// compute radius using current object (boundingRadius uses scale)
+	double r = obj->boundingRadius();
+
+	// choose collider type based on object type
+	int collider = Physics::COLLIDER_SPHERE;
+	double height = 1.0;
+	bool makeStatic = false;
+
+	if (obj->type == "Plane") {
+		collider = Physics::COLLIDER_PLANE;
+		height = 0.0;
+		makeStatic = true;
+	} else if (obj->type == "Cylinder") {
+		collider = Physics::COLLIDER_CYLINDER;
+		height = std::max(0.1, obj->scale.y * 2.0);
+	} else if (obj->type == "Sphere") {
+		collider = Physics::COLLIDER_SPHERE;
+		height = 1.0;
+	} else {
+		collider = Physics::COLLIDER_SPHERE;
+		height = 1.0;
+	}
+
+	Physics::RigidBody* rb = physics.createBody(obj, makeStatic, makeStatic ? 0.0 : 1.0, r, obj->position, collider, height);
+	if (rb) {
+		rb->enabled = obj->collisionEnabled;
+		rb->isStatic = makeStatic;
+		if (collider == Physics::COLLIDER_PLANE) rb->planeY = obj->position.y;
+		// Defensive: make static bodies effectively immovable.
+		if (makeStatic) {
+			rb->mass = 1e12;            // extremely large mass
+			// Ensure body position matches object (authoritative for owner-backed bodies)
+			if (rb->owner) rb->owner->position = obj->position;
+			else rb->position = obj->position;
+		} else {
+			// keep body position synced to owner
+			if (rb->owner) rb->position = rb->owner->position;
+		}
+	}
+	obj->physicsBody = rb;
+
+	// Debug logging so we can inspect what collider was actually created
+	std::cerr << "[SceneManager] recreatePhysicsBody: obj='" << obj->name
+			  << "' type='" << obj->type
+			  << "' pos=(" << obj->position.x << "," << obj->position.y << "," << obj->position.z << ")"
+			  << " scale=(" << obj->scale.x << "," << obj->scale.y << "," << obj->scale.z << ")"
+			  << " -> collider=" << (collider == Physics::COLLIDER_CYLINDER ? "CYLINDER" : "SPHERE")
+			  << " radius=" << r
+			  << " height=" << height
+			  << " static=" << (makeStatic ? "yes" : "no")
+			  << " enabled=" << (rb ? (rb->enabled ? "yes" : "no") : "none")
+			  << " mass=" << (rb ? rb->mass : 0.0)
+			  << std::endl;
 }

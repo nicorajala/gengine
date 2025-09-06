@@ -19,6 +19,8 @@ Shadow::Shadow() {
     float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
     glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
 
+    std::cerr << "[Shadow] Created depth texture id=" << depthMapTex << " size=" << SHADOW_SIZE << "x" << SHADOW_SIZE << std::endl;
+
     glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthMapTex, 0);
     glDrawBuffer(GL_NONE);
@@ -26,8 +28,14 @@ Shadow::Shadow() {
 
     GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     if (status != GL_FRAMEBUFFER_COMPLETE) {
-        std::cerr << "Shadow FBO incomplete: " << status << std::endl;
+        std::cerr << "[Shadow] Shadow FBO incomplete: " << status << std::endl;
+    } else {
+        std::cerr << "[Shadow] Shadow FBO complete (fbo=" << depthMapFBO << ", tex=" << depthMapTex << ")" << std::endl;
     }
+
+    // Check GL error
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) std::cerr << "[Shadow] GL error after FBO setup: 0x" << std::hex << err << std::dec << std::endl;
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -49,7 +57,6 @@ Shadow::~Shadow() {
 // depthProgram must be a depth-only shader that uses 'model','view','projection' uniforms.
 Mat4 Shadow::renderDepth(SceneManager* scene, GLuint depthProgram) {
     // compute a scene-centered light view/proj for directional lights (orthographic)
-    // Use scene bounds center so the directional light position in editor doesn't matter.
     Vec3d sceneMin(1e9f, 1e9f, 1e9f);
     Vec3d sceneMax(-1e9f, -1e9f, -1e9f);
     bool hasObjects = false;
@@ -58,7 +65,6 @@ Mat4 Shadow::renderDepth(SceneManager* scene, GLuint depthProgram) {
         Object* o = scene->objects[i];
         if (!o) continue;
         hasObjects = true;
-        // use object position as cheap proxy for object bounds center
         Vec3d p = o->position;
         sceneMin.x = std::min(sceneMin.x, p.x);
         sceneMin.y = std::min(sceneMin.y, p.y);
@@ -72,17 +78,13 @@ Mat4 Shadow::renderDepth(SceneManager* scene, GLuint depthProgram) {
     float useSz = sz;
     if (hasObjects) {
         center = (sceneMin + sceneMax) * 0.5f;
-        // expand orthographic half-size to cover scene extent if needed
         Vec3d ext = sceneMax - sceneMin;
         float maxDim = std::max(std::max(ext.x, ext.y), ext.z);
         if (maxDim * 0.6f > useSz) useSz = maxDim * 0.6f;
     } else {
-        // fallback to using the shadow's configured lightPos
         center = lightPos;
     }
 
-    // position the light camera so it looks at the scene center along lightDir.
-    // Place the camera sufficiently far opposite the light direction to cover the scene.
     Vec3d lightCamPos = center - lightDir.normalized() * (useSz * 2.0f);
 
     Mat4 lightView = lookAt(lightCamPos, center, Vec3d(0, 1, 0));

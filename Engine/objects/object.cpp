@@ -7,6 +7,9 @@ Object::Object() {
     name = "Unnamed object";
     VAO = VBO = EBO = 0;
     textureID = 0;
+
+    collisionEnabled = true;
+    physicsBody = nullptr;
 }
 
 void Object::initCube(float size) {
@@ -38,6 +41,14 @@ void Object::initSphere(float radius, int segments, int rings) {
 void Object::initPyramid(float size, float height) {
     ShapeGenerator::createPyramid(size, height, vertices, indices);
     type="Pyramid";
+    setupMesh();
+}
+
+void Object::initCone(float baseRadius, float height, int segments) {
+    Vec3d baseCenter(0.0f, -height/2.0f, 0.0f);
+    Vec3d tip(0.0f, height/2.0f, 0.0f);
+    ShapeGenerator::createCone(baseCenter, tip, baseRadius, segments, vertices, indices);
+    type="Cone";
     setupMesh();
 }
 
