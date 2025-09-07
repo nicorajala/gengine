@@ -123,6 +123,7 @@
 
 #include "imgui.h"
 #ifndef IMGUI_DISABLE
+#define IMGUI_IMPL_OPENGL_LOADER_GLAD
 #include "imgui_impl_opengl3.h"
 #include <stdio.h>
 #include <stdint.h>     // intptr_t

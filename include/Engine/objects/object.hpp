@@ -23,14 +23,20 @@ public:
 	std::string texturePath;
 
 	bool collisionEnabled;
+	bool isStatic;
 
 	// Pointer to physics body (managed by Physics::World). May be nullptr.
 	Physics::RigidBody* physicsBody;
+
+	Object* parent;                      // parent object (nullptr if root)
+	std::vector<Object*> children;       // child objects
 
 	std::vector<Vertex> vertices;
 	std::vector<unsigned int> indices;
 
 	Object();
+	~Object();
+
 	void initCube(float size);
 	void initCylinder(float radius, float height, int segments);
 	void initPlane(float width, float height);
@@ -39,7 +45,11 @@ public:
 	void initCone(float baseRadius, float height, int segments);
 
 	void setupMesh();
-	Mat4 getModelMatrix() const;
+	Mat4 getModelMatrix() const; // returns world model matrix (composed with parents)
+
+	// simple helpers to manage children (SceneManager will call these too)
+	void addChild(Object* child);
+	void removeChild(Object* child);
 
 	void texture(const std::string& path);
 	void draw() const;

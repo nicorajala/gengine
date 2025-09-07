@@ -34,6 +34,8 @@ public:
     double bodyRadius = 0.3;
     double bodyHeight = 1.8; // used for cylinder collider
     int bodyColliderType = Physics::COLLIDER_CYLINDER;
+
+    Object* cameraTargetObject = nullptr;
 };
 
 #endif

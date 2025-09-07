@@ -225,7 +225,7 @@ void World::step(float dt) {
         }
     }
 
-    // Optional: simple ground plane fallback (y = -50) to avoid falling forever for non-plane worlds
+    // (fallback ground plane)
     for (auto b : bodies_) {
         if (!b || b->isStatic || !b->enabled) continue;
         Vec3d pos = getBodyPos(b);
@@ -251,15 +251,29 @@ bool World::isOnGround(Object* owner, double eps) const {
 bool World::isOnGround(RigidBody* b, double eps) const {
     if (!b) return false;
     Vec3d pos = getBodyPos(b);
+
+    // First: check against explicit plane colliders (infinite planes)
+    for (auto other : bodies_) {
+        if (!other) continue;
+        if (other->colliderType != COLLIDER_PLANE) continue;
+        if (!other->isStatic) continue;                // treat static planes only
+        // owner may define planeY, otherwise use stored planeY
+        double planeY = other->planeY;
+        double bottom = (b->colliderType == COLLIDER_CYLINDER) ? (pos.y - b->height * 0.5) : (pos.y - b->radius);
+        if (bottom <= (planeY + eps)) return true;
+    }
+
+    // Second: existing ground fallback (y = -50)
     double bottom = (b->colliderType == COLLIDER_CYLINDER) ? (pos.y - b->height * 0.5) : (pos.y - b->radius);
     double groundY = -50.0;
     if (bottom <= (groundY + eps)) return true;
 
-    // check nearby bodies below
+    // Third: check for nearby bodies below (sphere/cylinder)
     for (auto other : bodies_) {
         if (other == b) continue;
         if (!other->enabled) continue;
         if (other->owner && !other->owner->collisionEnabled) continue;
+
         Vec3d otherPos = getBodyPos(other);
 
         // vertical check: other top must be below or near our bottom

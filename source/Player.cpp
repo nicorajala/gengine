@@ -52,8 +52,6 @@ void Player::Update(float dt)
 	cameraController->update(mainCamera, dt);
 	Vec3d intended = mainCamera.position - prevCamPos;
 
-	// If we have a physics body, controller already wrote target horizontal velocity into it.
-	// here we only handle jump + sync camera position from body.
 	if (rb) {
 		if (keys[SDL_SCANCODE_SPACE]) {
 			if (scene && scene->physics.isOnGround(rb, 0.05)) {
@@ -73,4 +71,11 @@ void Player::Update(float dt)
 
 	// keep orientation in object if present
 	if (playerObject) playerObject->rotation.y = mainCamera.yaw;
+
+	// If camera target object is set, override camera position to match target object's world position.
+	if (cameraTargetObject) {
+		Mat4 camModel = cameraTargetObject->getModelMatrix();
+		Vec3d camWorldPos = camModel.transformPoint(Vec3d(0.0f, 0.0f, 0.0f));
+		mainCamera.position = camWorldPos;
+	}
 }

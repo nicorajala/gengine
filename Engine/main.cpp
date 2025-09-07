@@ -29,8 +29,7 @@
 
 using namespace NMATH;
 
-// Global shader mode index used by the editor (0 = lit, 1 = unlit)
-int glShaderType = 0;
+int glShaderType = 0;						// Global shader mode index used by the editor (0 = lit, 1 = unlit, 2 = wireframe)
 
 int main(int argc, char* argv[]) {
 
@@ -64,7 +63,7 @@ int main(int argc, char* argv[]) {
 	SDL_Window* window = nullptr;
 	SDL_GLContext glContext = nullptr;
 
-	int major = 3, minor = 3;
+	int major = 4, minor = 6;
 	bool success = false;
 
 	while (!success && major >= 2) {
@@ -82,7 +81,8 @@ int main(int argc, char* argv[]) {
 
 		if (!window) {
 			printf("Window creation failed: %s\n", SDL_GetError());
-			major--; minor = 0;
+			if (minor > 0) minor--;
+			else { major--; minor = 5; }
 			continue;
 		}
 
@@ -92,7 +92,8 @@ int main(int argc, char* argv[]) {
 			SDL_GL_DeleteContext(glContext);
 			SDL_DestroyWindow(window);
 			window = NULL;
-			major--; minor = 0;
+			if (minor > 0) minor--;
+			else { major--; minor = 5; }
 			continue;
 		}
 
@@ -123,8 +124,8 @@ int main(int argc, char* argv[]) {
 	SDL_GL_MakeCurrent(window, glContext);
 
 	glEnable(GL_DEPTH_TEST);
-	//glEnable(GL_CULL_FACE);
-	//glCullFace(GL_BACK);
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
 	glFrontFace(GL_CCW);
 
 	Shaderc ShaderCompiler;
@@ -151,7 +152,7 @@ int main(int argc, char* argv[]) {
 
 	bool prevViewportMouseDown = false;
 
-	// --- Setup an FBO for rendering the viewport texture ---
+	// Setup an FBO for rendering the viewport texture
 	GLuint viewportFBO = 0;
 	GLuint viewportTexture = 0;
 	GLuint viewportDepthRBO = 0;

@@ -47,6 +47,8 @@ public:
             lastDx = lastDy = 0;
         }
 
+        SDL_SetRelativeMouseMode(SDL_TRUE);
+
         // movement requested by keys (world-space displacement)
         Vec3d forward = cam.forward();
         Vec3d right = forward.cross(Vec3d(0.0f, 1.0f, 0.0f)).normalized();
@@ -59,8 +61,6 @@ public:
             if (pendingKeys[SDL_SCANCODE_S]) moveDelta = moveDelta - forward * s;
             if (pendingKeys[SDL_SCANCODE_A]) moveDelta = moveDelta - right * s;
             if (pendingKeys[SDL_SCANCODE_D]) moveDelta = moveDelta + right * s;
-            if (pendingKeys[SDL_SCANCODE_Q]) moveDelta = moveDelta + Vec3d(0, 1, 0) * s;
-            if (pendingKeys[SDL_SCANCODE_E]) moveDelta = moveDelta - Vec3d(0, 1, 0) * s;
 
             if (physicsBody) {
                 // drive horizontal velocity on attached physics body (preserve vertical velocity)

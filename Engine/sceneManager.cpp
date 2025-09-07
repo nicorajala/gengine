@@ -4,8 +4,9 @@
 #include "Engine/util/shaderc.hpp"
 #include <sys/stat.h>
 
+#include "stb_image.h"
+
 // Helper function to get the position of a physics body.
-// Place this at the top of Engine/sceneManager.cpp (after includes, before usage).
 static Vec3d getBodyPos(const Physics::RigidBody* b) {
 	if (!b) return Vec3d(0.0f, 0.0f, 0.0f);
 	// If the body has an associated owner object, read the owner's authoritative position.
@@ -41,7 +42,13 @@ SceneManager::SceneManager()
 			selectedLightIndex(-1),
 			objCounter(0),
 			gridVAO(0), gridVBO(0), gridVertexCount(0),
-			physics() // default construct world
+			physics(), // default construct world
+			skyboxMode(SkyboxMode::None),
+			skyboxColor(Vec3d(0.53f, 0.81f, 0.92f)),
+			skyboxTextureID(0),
+			skyboxTexturePath(""),
+			skyboxVAO(0),
+			skyboxVBO(0)
 {
 	// Try relative path first (as before)
 	shadowDepthProgram = s_shaderCompiler.loadShader("shaders/shadows/shadow_depth_vert.glsl", "shaders/shadows/shadow_depth_frag.glsl");
@@ -70,6 +77,13 @@ SceneManager::SceneManager()
 			std::cerr << "[SceneManager] Failed to load shadow depth shader!" << std::endl;
 		}
 	}
+
+	Object* world = new Object();
+	world->type = "World";
+	world->name = "World";
+	world->scale = Vec3d(0, 0, 0);
+	world->position = Vec3d(0, -50, 0);
+	objects.push_back(world);
 }
 
 static bool readFileToString(const std::string& path, std::string& out) {
@@ -105,7 +119,12 @@ static void initMeshForType(Object* obj, const std::string& type) {
 	else if (type == "Sphere")  obj->initSphere(0.5f, 16, 16);
 	else if (type == "Plane")   obj->initPlane(5.0f, 5.0f);
 	else if (type == "Pyramid") obj->initPyramid(1.0f, 1.0f);
+	else if (type == "Player") {
+		obj->initCylinder(0.5f, 2.f, 16);
+	}
 	else                        obj->initCube(1.0f);
+
+	obj->type = type;
 }
 
 Vec3d closestPointOnLine(const Vec3d& rayOrigin, const Vec3d& rayDir,
@@ -336,8 +355,13 @@ bool SceneManager::pickGizmoAxis(const Vec3d& rayOrigin, const Vec3d& rayDir, Gi
 		}
 	}
 
-	if (hit) grabbedAxisIndex = hitIndex;
-	else grabbedAxisIndex = -1;
+	if (hit) {
+		grabbedAxisIndex = hitIndex;
+		// store picked axis into member so dragSelectedObject can use it safely
+		grabbedAxis = outAxis;
+	} else {
+		grabbedAxisIndex = -1;
+	}
 
 	return hit;
 }
@@ -379,6 +403,7 @@ Object* SceneManager::addObject(const std::string& type, const std::string& name
 
 	// attach physics body using bounding radius * average scale
 	double r = obj->boundingRadius();
+	Vec3d worldPos = obj->getModelMatrix().transformPoint(Vec3d(0.0f, 0.0f, 0.0f));
 
 	// Special-case Plane: use a thin, static cylinder collider matching plane scale
 	if (type == "Plane") {
@@ -387,6 +412,7 @@ Object* SceneManager::addObject(const std::string& type, const std::string& name
 			rb->isStatic = true;
 			rb->planeY = obj->position.y;
 			rb->enabled = obj->collisionEnabled;
+			rb->isStatic = obj->isStatic;
 		}
 		obj->physicsBody = rb;
 	} else {
@@ -397,17 +423,73 @@ Object* SceneManager::addObject(const std::string& type, const std::string& name
 	return obj;
 }
 
-void SceneManager::removeObject(Object* objPtr) {
-	for (std::vector<Object*>::iterator it = objects.begin(); it != objects.end(); ) {
-		if ((*it) == objPtr) {
-			// remove physics body first
-			physics.removeBody(objPtr);
-			it = objects.erase(it);
-		} else {
-			++it;
-		}
+// Helper to detect ancestor relationship (used to prevent cycles when parenting)
+static bool isAncestor(Object* node, Object* possibleAncestor) {
+	if (!node || !possibleAncestor) return false;
+	Object* p = node->parent;
+	while (p) {
+		if (p == possibleAncestor) return true;
+		p = p->parent;
+	}
+	return false;
+}
+
+void SceneManager::setParent(Object* child, Object* parent) {
+	if (!child) return;
+	if (child == parent) return;
+
+	// Prevent cycles: don't make 'parent' a child of 'child'
+	if (parent && isAncestor(parent, child)) {
+		std::cerr << "[SceneManager] setParent: would create cycle, rejecting\n";
+		return;
 	}
 
+	// Detach from previous parent (if any)
+	if (child->parent) {
+		child->parent->removeChild(child);
+		child->parent = nullptr;
+	}
+
+	// Attach to new parent
+	if (parent) {
+		bool found = false;
+		for (auto o : objects) if (o == parent) { found = true; break; }
+		if (!found) {
+			std::cerr << "[SceneManager] setParent: parent not in scene\n";
+			return;
+		}
+		// parent->addChild will set child's parent pointer
+		parent->addChild(child);
+	} else {
+		child->parent = nullptr;
+	}
+}
+
+void SceneManager::removeObject(Object* objPtr) {
+	if (!objPtr) return;
+
+	// Detach from parent if present
+	if (objPtr->parent) {
+		objPtr->parent->removeChild(objPtr);
+		objPtr->parent = nullptr;
+	}
+
+	// Reparent or clear children to avoid dangling pointers.
+	// Here we simply un-parent them (make them roots). Alternative: delete recursively.
+	for (auto c : objPtr->children) {
+		if (c) c->parent = nullptr;
+	}
+	objPtr->children.clear();
+
+	// remove physics body (if any)
+	physics.removeBody(objPtr);
+	objPtr->physicsBody = nullptr;
+
+	// remove from scene->objects
+	auto it = std::find(objects.begin(), objects.end(), objPtr);
+	if (it != objects.end()) objects.erase(it);
+
+	// finally free object
 	delete objPtr;
 }
 
@@ -442,6 +524,80 @@ void SceneManager::update(float deltaTime) {
 	const float maxStep = 1.0f / 30.0f;
 	float dt = std::min(deltaTime, maxStep);
 	physics.step(dt);
+}
+
+GLuint SceneManager::loadTextureFromFile(const std::string& path) {
+	if (path.empty()) return 0;
+	int w = 0, h = 0, nrChannels = 0;
+	stbi_uc* data = stbi_load(path.c_str(), &w, &h, &nrChannels, 0);
+	if (!data) {
+		std::cerr << "[SceneManager] Failed to load image: " << path << " (stbi)\n";
+		return 0;
+	}
+
+	GLenum format = GL_RGB;
+	if (nrChannels == 4) format = GL_RGBA;
+	else if (nrChannels == 3) format = GL_RGB;
+	else if (nrChannels == 1) format = GL_RED;
+
+	GLuint tex = 0;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+	glTexImage2D(GL_TEXTURE_2D, 0, format, w, h, 0, format, GL_UNSIGNED_BYTE, data);
+	glGenerateMipmap(GL_TEXTURE_2D);
+
+	glBindTexture(GL_TEXTURE_2D, 0);
+	stbi_image_free(data);
+	std::cerr << "[SceneManager] Loaded skybox texture '" << path << "' -> id=" << tex << " (" << w << "x" << h << ", ch=" << nrChannels << ")\n";
+	return tex;
+}
+
+void SceneManager::setSkyboxColor(const Vec3d& color) {
+	skyboxColor = color;
+	skyboxMode = SkyboxMode::Color;
+	// ensure we don't keep a texture bound if switching to color
+	if (skyboxTextureID != 0) {
+		glDeleteTextures(1, &skyboxTextureID);
+		skyboxTextureID = 0;
+		skyboxTexturePath.clear();
+	}
+}
+
+bool SceneManager::setSkyboxTexture(const std::string& path) {
+	if (path.empty()) {
+		clearSkybox();
+		return false;
+	}
+	if (!std::ifstream(path).good()) {
+		std::cerr << "[SceneManager] Skybox texture file not found: " << path << std::endl;
+		return false;
+	}
+	// load texture
+	GLuint newTex = loadTextureFromFile(path);
+	if (newTex == 0) return false;
+
+	// free existing
+	if (skyboxTextureID != 0) glDeleteTextures(1, &skyboxTextureID);
+
+	skyboxTextureID = newTex;
+	skyboxTexturePath = path;
+	skyboxMode = SkyboxMode::Texture;
+	return true;
+}
+
+void SceneManager::clearSkybox() {
+	if (skyboxTextureID != 0) {
+		glDeleteTextures(1, &skyboxTextureID);
+		skyboxTextureID = 0;
+	}
+	skyboxTexturePath.clear();
+	skyboxMode = SkyboxMode::None;
 }
 
 void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& projection) {
@@ -512,10 +668,97 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 		else if (glShaderType == 2 && s_wireProgram != 0) activeProgram = s_wireProgram;
 	}
 
+	// Save currently bound program so we can restore it where needed
+	GLint prevProg = 0;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
+
+	// Expose active program to editor (so gizmos/grid use the same)
+	lastActiveProgram = activeProgram;
+
+	// Use the active program for the rest of the draw (unless depthPass early return)
 	glUseProgram(activeProgram);
 
-	// store for external users (grid/gizmo drawing callers)
-	this->lastActiveProgram = activeProgram;
+	if (!depthPass) {
+		if (skyboxMode == SkyboxMode::Color) {
+			// clear color with sky color before drawing anything
+			glClearColor(skyboxColor.x, skyboxColor.y, skyboxColor.z, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+		} else if (skyboxMode == SkyboxMode::Texture && skyboxTextureID != 0) {
+			// draw fullscreen textured quad (use unlit shader when available)
+			GLuint bgProgram = (s_unlitProgram != 0) ? s_unlitProgram : activeProgram;
+
+			// lazy-init fullscreen quad VAO/VBO (pos.xyz + uv.xy)
+			if (skyboxVAO == 0) {
+				float quadVerts[] = {
+					// x, y, z,   u, v
+					-1.0f, -1.0f, 0.0f,  0.0f, 0.0f,
+					 1.0f, -1.0f, 0.0f,  1.0f, 0.0f,
+					 1.0f,  1.0f, 0.0f,  1.0f, 1.0f,
+					-1.0f, -1.0f, 0.0f,  0.0f, 0.0f,
+					 1.0f,  1.0f, 0.0f,  1.0f, 1.0f,
+					-1.0f,  1.0f, 0.0f,  0.0f, 1.0f
+				};
+				glGenVertexArrays(1, &skyboxVAO);
+				glGenBuffers(1, &skyboxVBO);
+				glBindVertexArray(skyboxVAO);
+				glBindBuffer(GL_ARRAY_BUFFER, skyboxVBO);
+				glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_STATIC_DRAW);
+				// pos -> location 0 (vec3)
+				glEnableVertexAttribArray(0);
+				glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+				// texcoord -> location 3 (matching objects' texcoord layout)
+				glEnableVertexAttribArray(3);
+				glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+				glBindVertexArray(0);
+			}
+
+			// preserve GL state
+			GLboolean wasDepthEnabled = glIsEnabled(GL_DEPTH_TEST);
+			GLboolean prevDepthMask = GL_TRUE;
+			glGetBooleanv(GL_DEPTH_WRITEMASK, &prevDepthMask);
+
+			// draw
+			glUseProgram(bgProgram);
+			glDisable(GL_DEPTH_TEST);
+			glDepthMask(GL_FALSE);
+
+			// set identity matrices if the shader exposes them (safe to query)
+			Mat4 I = Mat4(1.0f);
+			GLint locModel = glGetUniformLocation(bgProgram, "model");
+			if (locModel >= 0) glUniformMatrix4fv(locModel, 1, GL_FALSE, I.value_ptr());
+			GLint locView = glGetUniformLocation(bgProgram, "view");
+			if (locView >= 0) glUniformMatrix4fv(locView, 1, GL_FALSE, I.value_ptr());
+			GLint locProj = glGetUniformLocation(bgProgram, "projection");
+			if (locProj >= 0) glUniformMatrix4fv(locProj, 1, GL_FALSE, I.value_ptr());
+
+			// bind texture unit 0
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, skyboxTextureID);
+			GLint locTex = glGetUniformLocation(bgProgram, "uTexture");
+			if (locTex >= 0) glUniform1i(locTex, 0);
+			GLint locUseTex = glGetUniformLocation(bgProgram, "useTexture");
+			if (locUseTex >= 0) glUniform1i(locUseTex, 1);
+
+			glBindVertexArray(skyboxVAO);
+			glDrawArrays(GL_TRIANGLES, 0, 6);
+			glBindVertexArray(0);
+
+			// restore uniforms/state
+			if (locUseTex >= 0) glUniform1i(locUseTex, 0);
+			glBindTexture(GL_TEXTURE_2D, 0);
+			glDepthMask(prevDepthMask);
+			if (wasDepthEnabled) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+			// restore previous program (use saved prevProg)
+			glUseProgram((GLuint)prevProg);
+		}
+	}
+	
+	if (!depthPass) {
+		if (glShaderType == 1 && s_unlitProgram != 0) activeProgram = s_unlitProgram;
+		else if (glShaderType == 2 && s_wireProgram != 0) activeProgram = s_wireProgram;
+	}
+
+	glUseProgram(activeProgram);
 
 	// --- Ensure axis VAO/VBO exist (used for transform gizmo helper drawing in render)
 	if (axisVAO == 0) {
@@ -615,7 +858,8 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 			glUniform3fv(glGetUniformLocation(activeProgram, locColors.c_str()), 1, &l.color[0]);
 			glUniform1f(glGetUniformLocation(activeProgram, locInts.c_str()), l.intensity);
 			dirCount++;
-		} else if (l.type == LightType::Point) {
+		}
+		else if (l.type == LightType::Point) {
 			std::ostringstream ss; ss << pointCount; std::string idx = ss.str();
 			std::string locPos = std::string("pointLightPositions[") + idx + "]";
 			std::string locCol = std::string("pointLightColors[") + idx + "]";
@@ -632,14 +876,15 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 	glUniform1i(glGetUniformLocation(activeProgram, "uNumPointLights"), pointCount);
 
 	unsigned int modelLoc = glGetUniformLocation(activeProgram, "model");
-	unsigned int viewLoc  = glGetUniformLocation(activeProgram, "view");
-	unsigned int projLoc  = glGetUniformLocation(activeProgram, "projection");
+	unsigned int viewLoc = glGetUniformLocation(activeProgram, "view");
+	unsigned int projLoc = glGetUniformLocation(activeProgram, "projection");
 	glUniformMatrix4fv(viewLoc, 1, GL_FALSE, view.value_ptr());
 	glUniformMatrix4fv(projLoc, 1, GL_FALSE, projection.value_ptr());
 
 	// Draw scene objects (both regular and depth passes)
 	for (size_t oi = 0; oi < objects.size(); ++oi) {
 		Object* obj = objects[oi];
+		if (!obj) continue; // guard against nullptr entries
 		Mat4 model = obj->getModelMatrix();
 		glUniformMatrix4fv(modelLoc, 1, GL_FALSE, model.value_ptr());
 
@@ -649,7 +894,8 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 				glBindTexture(GL_TEXTURE_2D, obj->textureID);
 				glUniform1i(glGetUniformLocation(activeProgram, "uTexture"), 0);
 				glUniform1i(glGetUniformLocation(activeProgram, "useTexture"), 1);
-			} else {
+			}
+			else {
 				glUniform1i(glGetUniformLocation(activeProgram, "useTexture"), 0);
 			}
 
@@ -659,7 +905,8 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 
 		// Ensure object has mesh data and GL resources before drawing
 		if (obj->vertices.empty() || obj->indices.empty()) {
-			std::cerr << "[SceneManager] Skipping object " << oi << " - empty mesh data\n";
+			if (obj->type == "World") continue;
+			//std::cerr << "[SceneManager] Skipping object " << oi << " - empty mesh data\n";
 			continue;
 		}
 
@@ -735,7 +982,7 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 			glBindVertexArray(0);
 			glDeleteBuffers(1, &vbo);
 			glDeleteVertexArrays(1, &vao);
-		};
+			};
 
 		// helper to draw cylinder wireframe (top/bottom rings + vertical lines)
 		auto drawCylinder = [&](const Vec3d& center, double radius, double height, int segments = 20) {
@@ -747,7 +994,7 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 			drawRing(bottom, radius, segments);
 
 			// vertical lines at a few sample angles
-			for (int i = 0; i < segments; i += std::max(1, segments/8)) {
+			for (int i = 0; i < segments; i += std::max(1, segments / 8)) {
 				double a = (double)i / (double)segments * (2.0 * M_PI);
 				float tx = (float)(center.x + radius * std::cos(a));
 				float tz = (float)(center.z + radius * std::sin(a));
@@ -770,7 +1017,7 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 				glDeleteBuffers(1, &vbo);
 				glDeleteVertexArrays(1, &vao);
 			}
-		};
+			};
 
 		// helper to draw simple sphere wireframe using 3 rings (XZ, XY, YZ)
 		auto drawSphere = [&](const Vec3d& center, double radius, int segments = 24) {
@@ -806,7 +1053,7 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 			// YZ ring
 			{
 				std::vector<float> verts;
-			 verts.reserve(segments * 3);
+				verts.reserve(static_cast<std::vector<float, std::allocator<float>>::size_type>(segments) * 3);
 				for (int i = 0; i < segments; ++i) {
 					double a = (double)i / (double)segments * (2.0 * M_PI);
 					float z = (float)(center.z + radius * std::cos(a));
@@ -830,7 +1077,7 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 				glDeleteBuffers(1, &vbo);
 				glDeleteVertexArrays(1, &vao);
 			}
-		};
+			};
 
 		// iterate over physics bodies and draw according to type
 		for (auto b : physics.bodies_) {
@@ -838,7 +1085,8 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 			Vec3d center = getBodyPos(b);
 			if (b->colliderType == Physics::COLLIDER_CYLINDER) {
 				drawCylinder(center, b->radius, b->height);
-			} else {
+			}
+			else {
 				drawSphere(center, b->radius);
 			}
 		}
@@ -874,14 +1122,14 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 		for (size_t i = 0; i < lights.size(); ++i) {
 			// draw point at light position
 			Mat4 model = translate(Mat4(1.0f), lights[i].position);
-			glUniformMatrix4fv(glGetUniformLocation(activeProgram,"model"),1,GL_FALSE, model.value_ptr());
-			glUniform3fv(glGetUniformLocation(activeProgram,"overrideColor"),1,&lights[i].color[0]);
-			glUniform1i(glGetUniformLocation(activeProgram,"useOverrideColor"), 1);
+			glUniformMatrix4fv(glGetUniformLocation(activeProgram, "model"), 1, GL_FALSE, model.value_ptr());
+			glUniform3fv(glGetUniformLocation(activeProgram, "overrideColor"), 1, &lights[i].color[0]);
+			glUniform1i(glGetUniformLocation(activeProgram, "useOverrideColor"), 1);
 
 			// ensure the lightVBO contains a single point when drawing point
 			Vec3d pt = lights[i].position;
 			glBindBuffer(GL_ARRAY_BUFFER, lightVBO);
-			glBufferData(GL_ARRAY_BUFFER, sizeof(Vec3d), &Vec3d(0.0f,0.0f,0.0f), GL_DYNAMIC_DRAW);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(Vec3d), &Vec3d(0.0f, 0.0f, 0.0f), GL_DYNAMIC_DRAW);
 			// draw point (will be transformed by model uniform)
 			if ((int)i == selectedLightIndex) glPointSize(14.0f);
 			glDrawArrays(GL_POINTS, 0, 1);
@@ -896,13 +1144,13 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 
 			// Because the shader multiplies by model, we set model to identity for world-space line verts
 			Mat4 identity = Mat4(1.0f);
-			glUniformMatrix4fv(glGetUniformLocation(activeProgram,"model"),1,GL_FALSE, identity.value_ptr());
+			glUniformMatrix4fv(glGetUniformLocation(activeProgram, "model"), 1, GL_FALSE, identity.value_ptr());
 
 			glBindBuffer(GL_ARRAY_BUFFER, lightVBO);
 			glBufferData(GL_ARRAY_BUFFER, sizeof(linePts), linePts, GL_DYNAMIC_DRAW);
 
 			glEnableVertexAttribArray(0);
-			glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(Vec3d),(void*)0);
+			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vec3d), (void*)0);
 
 			glUniform1i(glGetUniformLocation(activeProgram, "useOverrideColor"), 1);
 			glUniform3fv(glGetUniformLocation(activeProgram, "overrideColor"), 1, &lights[i].color[0]);
@@ -910,15 +1158,16 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 			glDrawArrays(GL_LINES, 0, 2);
 
 			// restore VBO to single point  (so next point draw works)
-			Vec3d origin(0.0f,0.0f,0.0f);
+			Vec3d origin(0.0f, 0.0f, 0.0f);
 			glBindBuffer(GL_ARRAY_BUFFER, lightVBO);
 			glBufferData(GL_ARRAY_BUFFER, sizeof(Vec3d), &origin, GL_DYNAMIC_DRAW);
 		}
-		glUniform1i(glGetUniformLocation(activeProgram,"useOverrideColor"), 0);
+		glUniform1i(glGetUniformLocation(activeProgram, "useOverrideColor"), 0);
 		glPointSize(1.0f);
 		glBindVertexArray(0);
 	}
 }
+
 Object* SceneManager::pickObject(const Vec3d& rayOrigin, const Vec3d& rayDir) {
 	float bestDist = FLT_MAX;
 	Object* picked = nullptr;
@@ -926,6 +1175,7 @@ Object* SceneManager::pickObject(const Vec3d& rayOrigin, const Vec3d& rayDir) {
 	for (size_t oi = 0; oi < objects.size(); ++oi) {
 		Object* obj = objects[oi];
 		if (!obj) continue;
+		if (obj->type == "World") continue;
 		if (obj->indices.size() < 3 || obj->vertices.size() == 0) continue;
 
 		// Transform ray into object local space
@@ -960,16 +1210,15 @@ Object* SceneManager::pickObject(const Vec3d& rayOrigin, const Vec3d& rayDir) {
 	return picked;
 }
 
-
 void SceneManager::initGrid(int gridSize, float spacing) {
 	std::vector<Vec3d> gridVertices;
 
 	for (int i = -gridSize; i <= gridSize; i++) {
 		gridVertices.push_back(Vec3d(i * spacing, 0.0f, -gridSize * spacing));
-		gridVertices.push_back(Vec3d(i * spacing, 0.0f,  gridSize * spacing));
+		gridVertices.push_back(Vec3d(i * spacing, 0.0f, gridSize * spacing));
 
 		gridVertices.push_back(Vec3d(-gridSize * spacing, 0.0f, i * spacing));
-		gridVertices.push_back(Vec3d( gridSize * spacing, 0.0f, i * spacing));
+		gridVertices.push_back(Vec3d(gridSize * spacing, 0.0f, i * spacing));
 	}
 
 	gridVertexCount = gridVertices.size();
@@ -980,7 +1229,7 @@ void SceneManager::initGrid(int gridSize, float spacing) {
 	glBindVertexArray(gridVAO);
 	glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
 	glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(Vec3d),
-	gridVertices.data(), GL_STATIC_DRAW);
+		gridVertices.data(), GL_STATIC_DRAW);
 
 	glEnableVertexAttribArray(0);
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vec3d), (void*)0);
@@ -1019,6 +1268,16 @@ void SceneManager::saveScene(const std::string& path) {
 		o["texturePath"] = obj->texturePath;
 		// persist collision flag (default true)
 		o["collision"] = obj->collisionEnabled;
+		o["isStatic"] = obj->isStatic;
+		
+		int parentIdx = -1;
+		if (obj->parent) {
+			for (size_t pi = 0; pi < objects.size(); ++pi) {
+				if (objects[pi] == obj->parent) { parentIdx = (int)pi; break; }
+			}
+		}
+		o["parent"] = parentIdx;
+
 		j["objects"].push_back(o);
 	}
 
@@ -1034,6 +1293,18 @@ void SceneManager::saveScene(const std::string& path) {
 		l["intensity"] = light.intensity;
 		j["lights"].push_back(l);
 	}
+
+	// skybox
+	json sky;
+	if (skyboxMode == SkyboxMode::None) sky["mode"] = "None";
+	else if (skyboxMode == SkyboxMode::Color) {
+		sky["mode"] = "Color";
+		sky["color"] = { skyboxColor.x, skyboxColor.y, skyboxColor.z };
+	} else if (skyboxMode == SkyboxMode::Texture) {
+		sky["mode"] = "Texture";
+		sky["texturePath"] = skyboxTexturePath;
+	}
+	j["skybox"] = sky;
 
 	std::ofstream file(path);
 	if (file.is_open()) {
@@ -1065,6 +1336,9 @@ void SceneManager::loadScene(const std::string& path) {
 		return;
 	}
 
+	std::vector<int> parentIdxs;
+	parentIdxs.reserve(j["objects"].size());
+
 	for (size_t ji = 0; ji < j["objects"].size(); ++ji) {
 		const json& objJson = j["objects"][ji];
 		std::string type = objJson.value("type", "Cube");
@@ -1082,6 +1356,8 @@ void SceneManager::loadScene(const std::string& path) {
 		}
 		std::string texPath = objJson.value("texturePath", "");
 		bool collision = objJson.value("collision", true);
+		bool isStatic = objJson.value("isStatic", false);
+		int parentIdx = objJson.value("parent", -1);
 
 		Object* o = new Object();
 		o->name = name;
@@ -1094,15 +1370,28 @@ void SceneManager::loadScene(const std::string& path) {
 		o->scale    = scl;
 
 		o->collisionEnabled = collision;
+		o->isStatic = isStatic;
 
 		if (!texPath.empty()) {
 			o->texture(texPath);
 		}
 
 		objects.push_back(o);
+		parentIdxs.push_back(parentIdx);
 
 		// create physics body that matches the current transform/scale/type
 		recreatePhysicsBody(o);
+	}
+
+	// Apply parent relationships
+	for (size_t i = 0; i < parentIdxs.size(); ++i) {
+		int p = parentIdxs[i];
+		if (p >= 0 && p < (int)objects.size()) {
+			setParent(objects[i], objects[p]);
+		}
+		else {
+			setParent(objects[i], nullptr);
+		}
 	}
 
 	if (j.find("lights") == j.end() || !j["lights"].is_array()) {
@@ -1148,6 +1437,26 @@ void SceneManager::loadScene(const std::string& path) {
 		sh->farP = 60.0f;
 		lightShadows.push_back(sh);
 	}
+
+	// After loading objects and lights, load skybox if present
+	if (j.find("skybox") != j.end() && j["skybox"].is_object()) {
+		const json& sky = j["skybox"];
+		std::string mode = sky.value("mode", "None");
+		if (mode == "Color") {
+			if (sky.find("color") != sky.end() && sky["color"].size() == 3) {
+				Vec3d c = Vec3d((float)sky["color"][0], (float)sky["color"][1], (float)sky["color"][2]);
+				setSkyboxColor(c);
+			}
+		} else if (mode == "Texture") {
+			std::string tpath = sky.value("texturePath", "");
+			if (!tpath.empty()) setSkyboxTexture(tpath);
+		} else {
+			clearSkybox();
+		}
+	} else {
+		// default behaviour: no skybox
+		clearSkybox();
+	}
 }
 
 void SceneManager::recreatePhysicsBody(Object* obj) {
@@ -1170,7 +1479,7 @@ void SceneManager::recreatePhysicsBody(Object* obj) {
 	if (obj->type == "Plane") {
 		collider = Physics::COLLIDER_PLANE;
 		height = 0.0;
-		makeStatic = true;
+		obj->isStatic = true;
 	} else if (obj->type == "Cylinder") {
 		collider = Physics::COLLIDER_CYLINDER;
 		height = std::max(0.1, obj->scale.y * 2.0);
@@ -1182,34 +1491,26 @@ void SceneManager::recreatePhysicsBody(Object* obj) {
 		height = 1.0;
 	}
 
-	Physics::RigidBody* rb = physics.createBody(obj, makeStatic, makeStatic ? 0.0 : 1.0, r, obj->position, collider, height);
+	// world position from composed model matrix
+	Vec3d worldPos = obj->getModelMatrix().transformPoint(Vec3d(0.0f, 0.0f, 0.0f));
+
+	Physics::RigidBody* rb = physics.createBody(obj, obj->isStatic, obj->isStatic ? 0.0 : 1.0, r, worldPos, collider, height);
 	if (rb) {
 		rb->enabled = obj->collisionEnabled;
-		rb->isStatic = makeStatic;
+		rb->isStatic = obj->isStatic;
 		if (collider == Physics::COLLIDER_PLANE) rb->planeY = obj->position.y;
-		// Defensive: make static bodies effectively immovable.
 		if (makeStatic) {
-			rb->mass = 1e12;            // extremely large mass
-			// Ensure body position matches object (authoritative for owner-backed bodies)
+			rb->mass = 1e12;
 			if (rb->owner) rb->owner->position = obj->position;
 			else rb->position = obj->position;
 		} else {
-			// keep body position synced to owner
 			if (rb->owner) rb->position = rb->owner->position;
 		}
 	}
 	obj->physicsBody = rb;
 
-	// Debug logging so we can inspect what collider was actually created
 	std::cerr << "[SceneManager] recreatePhysicsBody: obj='" << obj->name
 			  << "' type='" << obj->type
-			  << "' pos=(" << obj->position.x << "," << obj->position.y << "," << obj->position.z << ")"
-			  << " scale=(" << obj->scale.x << "," << obj->scale.y << "," << obj->scale.z << ")"
-			  << " -> collider=" << (collider == Physics::COLLIDER_CYLINDER ? "CYLINDER" : "SPHERE")
-			  << " radius=" << r
-			  << " height=" << height
-			  << " static=" << (makeStatic ? "yes" : "no")
-			  << " enabled=" << (rb ? (rb->enabled ? "yes" : "no") : "none")
-			  << " mass=" << (rb ? rb->mass : 0.0)
-			  << std::endl;
+			  << "' worldPos=(" << worldPos.x << "," << worldPos.y << "," << worldPos.z << ")"
+			  << " radius=" << r << " height=" << height << std::endl;
 }

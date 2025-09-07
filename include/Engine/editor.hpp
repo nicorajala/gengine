@@ -85,6 +85,7 @@ private:
     // Preferences UI
     bool showPreferences;
     char externalEditorPath[512]; // path to external text editor executable
+    int preferredGraphicsAPI = 0;
 
     Uint64 NOW = SDL_GetTicks();
     Uint64 LAST = 0;
