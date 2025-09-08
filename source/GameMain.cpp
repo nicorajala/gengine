@@ -44,11 +44,16 @@ GameMain::GameMain() {
 GameMain::~GameMain()
 {
 	delete player;
+	player = nullptr;
 
 	if (scene) {
 		delete scene;
 		scene = NULL;
 	}
+
+	cube1 = nullptr;
+	sphere1 = nullptr;
+	floor = nullptr;
 }
 
 void GameMain::Start()
@@ -79,7 +84,7 @@ void GameMain::Start()
 		camTarget->name = foundPlayer->name + std::string("_CameraTarget");
 		camTarget->type = "CameraTarget";
 		// local offset behind and above player by default (local coordinates)
-		camTarget->position = Vec3d(0.0f, 1.8f, -3.0f);
+		camTarget->position = Vec3d(0.0f, 1.f, 0.f);
 		camTarget->scale = Vec3d(1.0f);
 		// add camTarget to scene AFTER we've finished iterating objects to avoid invalidating iterators
 		scene->objects.push_back(camTarget);

@@ -1,7 +1,8 @@
-#include "Engine/editor.hpp"
+ï»¿#include "Engine/editor.hpp"
 #include <algorithm>
 #include <cctype>
 #include <unordered_map>
+#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -12,7 +13,7 @@ Editor::Editor(SDL_Window* w, GameMain* g, float& width)
 	  viewportHovered(false), viewportMouseU(0.0f), viewportMouseV(0.0f), viewportMouseDown(false),
 	  currentProjectPath(""), selectedFile(""), objectCount(0), renaming(false),
 	  showBuildWindow(false), sceneFiles(), sceneSel(), buildMessage(), invokeCMakeBuild(true), selectedFolder(),
-	showPreferences(false), showShadowView(false), shadowPreviewSize(128)
+	showPreferences(false), showShadowView(false), shadowPreviewSize(128), showAbout(false)
 {
 	// initialize arrays
 	pos[0]=pos[1]=pos[2]=0.0f;
@@ -64,6 +65,29 @@ void Editor::ensurePreviewTextures(size_t count) {
 
 void Editor::Update() {
 	int wW, wH; SDL_GetWindowSize(window, &wW, &wH);
+
+	ImGuiIO& io = ImGui::GetIO();
+	if (playMode) {
+		if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+			mouseLocked = false;
+			SDL_ShowCursor(SDL_ENABLE);
+			SDL_SetRelativeMouseMode(SDL_FALSE);
+		}
+		if (viewportHovered && ImGui::IsMouseClicked(0) && !mouseLocked) {
+			mouseLocked = true;
+			SDL_ShowCursor(SDL_DISABLE);
+			SDL_SetRelativeMouseMode(SDL_TRUE);
+		}
+		if (mouseLocked) {
+			SDL_ShowCursor(SDL_DISABLE);
+			SDL_SetRelativeMouseMode(SDL_TRUE);
+		}
+	}
+	else {
+		mouseLocked = false;
+		SDL_ShowCursor(SDL_ENABLE);
+		SDL_SetRelativeMouseMode(SDL_FALSE);
+	}
 	
 	ImGuiViewport* viewport = ImGui::GetMainViewport();
 	ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y+15), ImGuiCond_Always);
@@ -98,7 +122,7 @@ void Editor::Update() {
 
 	ImGui::BeginChild("SceneToolbar", ImVec2(0, 28), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 	{
-		if (ImGui::Button("Play")) {
+		if (ImGui::Button("Play (process)")) {
 			// create and save temporary scene path (use native separators)
 			fs::path tmpScenePath = currentProjectPath.empty()
 										? fs::path(fs::current_path()) / "tmp_play_scene.gscene"
@@ -185,6 +209,44 @@ void Editor::Update() {
 #endif
 			}
 		}
+
+		ImGui::SameLine();
+
+		if (!playMode) {
+			if (ImGui::Button("Play")) {
+				playMode = true;
+
+				playModeBackupScenePath = (currentProjectPath.empty() ? "tmp_editor_scene.gscene" : (currentProjectPath + "/tmp_editor_scene.gscene"));
+				if (game && game->scene) {
+					game->scene->saveScene(playModeBackupScenePath);
+					game->Start();
+				}
+			}
+			ImGui::SameLine();
+		}
+		else {
+			if (ImGui::Button("Stop")) {
+				playMode = false;
+
+				//if (game && game->scene && !playModeBackupScenePath.empty()) {
+				//	if (game->player) {
+				//		game->player->playerObject = nullptr;
+				//		game->player->cameraTargetObject = nullptr;
+				//	}
+				//	game->scene->selectedObject = nullptr;
+
+				//	game->scene->loadScene(playModeBackupScenePath);
+				//}
+				// Doesn't work yet
+
+				//fs::remove(playModeBackupScenePath.c_str());
+				if (game) {
+					game->Start();
+				}
+			}
+			ImGui::SameLine();
+		}
+
 		ImGui::SameLine();
 		ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
 		ImGui::SameLine();
@@ -282,8 +344,24 @@ void Editor::MainMenu() {
 			ImGui::MenuItem("Shadows", NULL, &showShadowView);
 			ImGui::EndMenu();
 		}
+
+		if (ImGui::BeginMenu("Help")) {
+			ImGui::MenuItem(("About"), NULL, &showAbout);
+
+			ImGui::EndMenu();
+		}
 	}
 	ImGui::EndMainMenuBar();
+
+	if (showAbout) {
+		ImGui::SetNextWindowSize(ImVec2(400, 200), ImGuiCond_Always);
+		ImGui::Begin("About SOULCRUSHER Editor", &showAbout);
+
+		ImGui::Text("SOULCRUSHER Editor");
+		ImGui::Separator();
+		ImGui::Text("Version 1.0.0");
+		ImGui::End();
+	}
 
 	// Preferences window
 	if (showPreferences) {
@@ -439,48 +517,53 @@ void Editor::MainMenu() {
 
 				// optionally invoke cmake build for the player target
 				if (invokeCMakeBuild) {
-					// note: this assumes current working dir is the configured build dir, or cmake was run from here
-					std::string buildCmd = "cmake --build . --target GENGINE_PLAYER --config Release";
-					int r = system(buildCmd.c_str());
-					if (r == 0) {
-						// try to find the executable in several likely locations and copy it beside the package
-						std::vector<fs::path> lookPaths = {
-							fs::path(fs::current_path()) / "GENGINE_PLAYER",
-							fs::path(fs::current_path()) / "GENGINE_PLAYER.exe",
-							fs::path(fs::current_path()) / "GENGINE_PLAYER.exe",
-							fs::path(fs::current_path()) / "Release" / "GENGINE_PLAYER.exe",
-							fs::path(fs::current_path()) / "Release" / "GENGINE_PLAYER",
-							fs::path(fs::current_path()) / "bin" / "Release" / "GENGINE_PLAYER.exe",
-							fs::path(fs::current_path()) / "bin" / "Release" / "GENGINE_PLAYER"
-						};
-						fs::path foundExe;
-						for (auto &p : lookPaths) {
-							if (fs::exists(p)) { foundExe = p; break; }
-						}
-						if (foundExe.string().empty()) {
-							// try scanning current directory for files starting with GENGINE_PLAYER
-							for (auto &entry : fs::directory_iterator(fs::current_path())) {
-								std::string name = entry.path_().filename().string();
-								if (name.find("GENGINE_PLAYER") != std::string::npos) {
-									foundExe = entry.path_();
-									break;
+					// run build in background thread so UI doesn't hang
+					buildMessage += " â€” starting cmake build...";
+					fs::path capturedOutDir = outDir;
+					this->buildMessage = buildMessage;
+					std::thread([this, capturedOutDir]() {
+						std::string buildCmd = "cmake --build . --target GENGINE_PLAYER --config Release";
+						int r = system(buildCmd.c_str());
+						if (r == 0) {
+							// try to find the executable in several likely locations and copy it beside the package
+							std::vector<fs::path> lookPaths = {
+								fs::path(fs::current_path()) / "GENGINE_PLAYER",
+								fs::path(fs::current_path()) / "GENGINE_PLAYER.exe",
+								fs::path(fs::current_path()) / "GENGINE_PLAYER.exe",
+								fs::path(fs::current_path()) / "Release" / "GENGINE_PLAYER.exe",
+								fs::path(fs::current_path()) / "Release" / "GENGINE_PLAYER",
+								fs::path(fs::current_path()) / "bin" / "Release" / "GENGINE_PLAYER.exe",
+								fs::path(fs::current_path()) / "bin" / "Release" / "GENGINE_PLAYER"
+							};
+							fs::path foundExe;
+							for (auto &p : lookPaths) {
+								if (fs::exists(p)) { foundExe = p; break; }
+							}
+							if (foundExe.string().empty()) {
+								// try scanning current directory for files starting with GENGINE_PLAYER
+								for (auto &entry : fs::directory_iterator(fs::current_path())) {
+									std::string name = entry.path_().filename().string();
+									if (name.find("GENGINE_PLAYER") != std::string::npos) {
+										foundExe = entry.path_();
+										break;
+									}
 								}
 							}
-						}
-						if (!foundExe.string().empty()) {
-							try {
-								fs::copy(foundExe, outDir / foundExe.filename(), fs::copy_options_overwrite_existing);
-								buildMessage += " — built exe copied: " + (outDir / foundExe.filename()).string();
-							} catch (std::exception& e) {
-								buildMessage += " — exe found but copy failed: ";
-								buildMessage += e.what();
+							if (!foundExe.string().empty()) {
+								try {
+									fs::copy(foundExe, capturedOutDir / foundExe.filename(), fs::copy_options_overwrite_existing);
+									this->buildMessage += " â€” built exe copied: " + (capturedOutDir / foundExe.filename()).string();
+								} catch (std::exception& e) {
+									this->buildMessage += " â€” exe found but copy failed: ";
+									this->buildMessage += e.what();
+								}
+							} else {
+								this->buildMessage += " â€” built but exe not found automatically; check your build output.";
 							}
 						} else {
-							buildMessage += " — built but exe not found automatically; check your build output.";
+							this->buildMessage += " â€” cmake build failed (see console output).";
 						}
-					} else {
-						buildMessage += " — cmake build failed (see console output).";
-					}
+					}).detach();
 				}
 			}
 
@@ -501,7 +584,11 @@ void Editor::MainMenu() {
 #else
 				std::string cmd = "xdg-open \"" + buildsRoot.string() + "\"";
 #endif
-				system(cmd.c_str());
+				// open asynchronously to avoid blocking the UI (xdg-open/open/start usually return quickly but keep consistent)
+				std::thread([cmd]() {
+					int r = system(cmd.c_str());
+					(void)r;
+				}).detach();
 			}
 
 			ImGui::End();
@@ -534,7 +621,7 @@ void Editor::drawShadowView() {
 		if (!sh) continue;
 
 		// read depth image from shadow texture (may be large) -- read into CPU then upload resized float red texture.
-		// This is a debug path — it's fine for interactive use but not optimized.
+		// This is a debug path â€” it's fine for interactive use but not optimized.
 		GLint oldTex = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTex);
 		glBindTexture(GL_TEXTURE_2D, sh->getDepthTexture());
 
@@ -620,16 +707,52 @@ void Editor::EditorGUI() {
 			}
 
 			if (ImGui::CollapsingHeader("Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
-				bool col = obj->collisionEnabled;
-				if (ImGui::Checkbox("Collision", &col)) {
-					obj->collisionEnabled = col;
-					if (game && game->scene) game->scene->recreatePhysicsBody(obj);
+				Physics::World& world = game->scene->physics;
+				static bool physicsEnabled = world.enabled;
+				if (ImGui::Checkbox("Enable Physics", &physicsEnabled)) {
+					world.setEnabled(physicsEnabled);
 				}
-
-				bool isStatic = obj->isStatic;
-				if (ImGui::Checkbox("Static", &isStatic)) {
-					obj->isStatic = isStatic;
-					if (game && game->scene) game->scene->recreatePhysicsBody(obj);
+				Vec3d g = world.gravity;
+				if (ImGui::DragFloat3("Gravity", &g.x, 0.1f, -100.0f, 100.0f)) {
+					world.setGravity(g);
+				}
+				float rest = (float)world.restitution;
+				if (ImGui::SliderFloat("Restitution", &rest, 0.0f, 1.0f)) {
+					world.setRestitution(rest);
+				}
+				float corr = (float)world.positionalCorrection;
+				if (ImGui::SliderFloat("Positional Correction", &corr, 0.0f, 1.0f)) {
+					world.setPositionalCorrection(corr);
+				}
+				float fric = (float)world.friction;
+				if (ImGui::SliderFloat("Friction", &fric, 0.0f, 1.0f)) {
+					world.setFriction(fric);
+				}
+				// Per-object physics (if selected)
+				if (game->scene->selectedObject && game->scene->selectedObject->physicsBody) {
+					Physics::RigidBody* rb = game->scene->selectedObject->physicsBody;
+					ImGui::Separator();
+					ImGui::Text("Selected Object Physics");
+					float mass = (float)rb->mass;
+					if (ImGui::DragFloat("Mass", &mass, 0.01f, 0.01f, 1000.0f)) {
+						rb->mass = max(0.01, (double)mass);
+					}
+					float fr = (float)rb->friction;
+					if (ImGui::SliderFloat("Friction (Obj)", &fr, 0.0f, 1.0f)) {
+						rb->friction = fr;
+					}
+					float re = (float)rb->restitution;
+					if (ImGui::SliderFloat("Restitution (Obj)", &re, 0.0f, 1.0f)) {
+						rb->restitution = re;
+					}
+					bool stat = rb->isStatic;
+					if (ImGui::Checkbox("Static", &stat)) {
+						rb->isStatic = stat;
+					}
+					bool en = rb->enabled;
+					if (ImGui::Checkbox("Enabled", &en)) {
+						rb->enabled = en;
+					}
 				}
 			}
 

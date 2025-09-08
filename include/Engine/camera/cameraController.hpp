@@ -3,7 +3,7 @@
 
 #include "Engine/camera/Camera.hpp"
 #include "SDL2/SDL.h"
-#include "Engine/physics/physics.hpp" // new: camera controller can own/drive a RigidBody
+#include "Engine/physics/physics.hpp"
 
 struct CameraController {
 	virtual ~CameraController() {}
@@ -12,8 +12,6 @@ struct CameraController {
 	virtual void onKeyboard(const Uint8* keyState, float dt) = 0;
 	virtual void update(Camera& cam, float dt) = 0;
 
-	// Optional: attach a physics body to be used by the controller.
-	// Default implementation does nothing (not all controllers support physics bodies).
 	virtual void setPhysicsBody(Physics::RigidBody* body) { (void)body; }
 };
 
@@ -46,8 +44,6 @@ public:
             if (cam.pitch < -89.9f) cam.pitch = -89.9f;
             lastDx = lastDy = 0;
         }
-
-        SDL_SetRelativeMouseMode(SDL_TRUE);
 
         // movement requested by keys (world-space displacement)
         Vec3d forward = cam.forward();

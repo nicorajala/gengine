@@ -1,15 +1,20 @@
 #include "Engine/physics/physics.hpp"
-#include "Engine/objects/object.hpp" // needed to access and write owner->position
+#include "Engine/objects/object.hpp"
 #include <algorithm>
 #include <iostream>
+#include <cmath>
 
 using namespace Physics;
 using namespace NMATH;
 
+// --- World Implementation ---
+
 World::World()
     : gravity(Vec3d(0.0, -9.81, 0.0)),
       restitution(0.2),
-      positionalCorrection(0.8)
+      positionalCorrection(0.8),
+      friction(0.5),
+      enabled(true)
 {
 }
 
@@ -17,6 +22,12 @@ World::~World() {
     for (auto b : bodies_) delete b;
     bodies_.clear();
 }
+
+void World::setGravity(const Vec3d& g) { gravity = g; }
+void World::setRestitution(double r) { restitution = r; }
+void World::setPositionalCorrection(double c) { positionalCorrection = c; }
+void World::setFriction(double f) { friction = f; }
+void World::setEnabled(bool e) { enabled = e; }
 
 RigidBody* World::createBody(Object* owner, bool isStatic, double mass, double radius, const Vec3d& position, int colliderType, double height) {
     // reuse existing if present (and update properties)
@@ -42,6 +53,8 @@ RigidBody* World::createBody(Object* owner, bool isStatic, double mass, double r
     b->height = height;
     b->colliderType = colliderType;
     b->enabled = owner ? owner->collisionEnabled : true;
+    b->friction = friction;
+    b->restitution = restitution;
 
     // If an owner is supplied, initialize the body position from owner; otherwise use provided position
     if (owner) b->position = owner->position;
@@ -70,7 +83,9 @@ void World::removeBody(Object* owner) {
     }
 }
 
-static void applyImpulse(RigidBody* a, RigidBody* b, const Vec3d& normal) {
+// --- Physics Core ---
+
+static void applyImpulse(RigidBody* a, RigidBody* b, const Vec3d& normal, double restitution, double friction) {
     // relative velocity along normal
     Vec3d rv = b->vel - a->vel;
     double velAlongNormal = rv.dot(normal);
@@ -79,7 +94,8 @@ static void applyImpulse(RigidBody* a, RigidBody* b, const Vec3d& normal) {
     double invMassA = a->isStatic ? 0.0 : 1.0 / a->mass;
     double invMassB = b->isStatic ? 0.0 : 1.0 / b->mass;
 
-    double e = 0.2;
+    double e = std::min(a->restitution, b->restitution);
+    if (restitution >= 0.0) e = restitution;
 
     double j = -(1.0 + e) * velAlongNormal;
     double denom = invMassA + invMassB;
@@ -89,6 +105,18 @@ static void applyImpulse(RigidBody* a, RigidBody* b, const Vec3d& normal) {
     Vec3d impulse = normal * j;
     if (!a->isStatic) a->vel = a->vel - impulse * invMassA;
     if (!b->isStatic) b->vel = b->vel + impulse * invMassB;
+
+    // Friction impulse (Coulomb friction)
+    Vec3d tangent = rv - normal * velAlongNormal;
+    if (tangent.length() > 1e-6) tangent = tangent.normalized();
+    double mu = std::sqrt(a->friction * b->friction);
+    double jt = -rv.dot(tangent);
+    jt /= denom;
+    jt = clamp(jt, -mu * j, mu * j);
+
+    Vec3d frictionImpulse = tangent * jt;
+    if (!a->isStatic) a->vel = a->vel - frictionImpulse * invMassA;
+    if (!b->isStatic) b->vel = b->vel + frictionImpulse * invMassB;
 }
 
 static inline Vec3d getBodyPos(RigidBody* b) {
@@ -101,7 +129,7 @@ static inline void applyPositionDelta(RigidBody* b, const Vec3d& delta) {
 }
 
 void World::step(float dt) {
-    if (dt <= 0.0f) return;
+    if (!enabled || dt <= 0.0f) return;
 
     // Integrate forces -> velocities (semi-implicit Euler)
     for (auto b : bodies_) {
@@ -124,7 +152,6 @@ void World::step(float dt) {
             // If either owner has collision disabled, skip
             if (A->owner && !A->owner->collisionEnabled) continue;
             if (B->owner && !B->owner->collisionEnabled) continue;
-
             // Skip any pair where either collider is a PLANE: plane handled in dedicated pass below
             if (A->colliderType == COLLIDER_PLANE || B->colliderType == COLLIDER_PLANE) continue;
 
@@ -186,8 +213,10 @@ void World::step(float dt) {
                     if (!B->isStatic) applyPositionDelta(B, normal * corrB);
                 }
 
-                // apply impulse using the horizontal normal (so vertical velocities are preserved)
-                applyImpulse(A, B, normal);
+                // Use per-body restitution/friction if set, else world defaults
+                double e = (A->restitution >= 0.0 && B->restitution >= 0.0) ? std::min(A->restitution, B->restitution) : restitution;
+                double mu = (A->friction >= 0.0 && B->friction >= 0.0) ? std::sqrt(A->friction * B->friction) : friction;
+                applyImpulse(A, B, normal, e, mu);
             }
         }
     }
@@ -220,7 +249,10 @@ void World::step(float dt) {
                 if (b->owner) b->owner->position.y = newY;
                 else b->position.y = newY;
                 // reflect vertical velocity with restitution
-                if (b->vel.y < 0.0) b->vel.y = -b->vel.y * restitution;
+                if (b->vel.y < 0.0) b->vel.y = -b->vel.y * ((b->restitution >= 0.0) ? b->restitution : restitution);
+                // Friction on ground
+                b->vel.x *= 1.0 - ((b->friction >= 0.0) ? b->friction : friction) * 0.1;
+                b->vel.z *= 1.0 - ((b->friction >= 0.0) ? b->friction : friction) * 0.1;
             }
         }
     }
@@ -235,7 +267,9 @@ void World::step(float dt) {
             double newY = groundY + ((b->colliderType == COLLIDER_CYLINDER) ? (b->height * 0.5) : b->radius);
             if (b->owner) b->owner->position.y = newY;
             else b->position.y = newY;
-            if (b->vel.y < 0.0) b->vel.y = -b->vel.y * restitution;
+            if (b->vel.y < 0.0) b->vel.y = -b->vel.y * ((b->restitution >= 0.0) ? b->restitution : restitution);
+            b->vel.x *= 1.0 - ((b->friction >= 0.0) ? b->friction : friction) * 0.1;
+            b->vel.z *= 1.0 - ((b->friction >= 0.0) ? b->friction : friction) * 0.1;
         }
     }
 }

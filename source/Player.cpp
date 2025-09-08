@@ -3,6 +3,14 @@
 #include <string>
 #include <iostream>
 
+Player::~Player() {
+
+	scene = nullptr;
+	playerObject = nullptr;
+	cameraTargetObject = nullptr;
+	cameraController = nullptr;
+}
+
 void Player::Start()
 {
 	mainCamera.position = Vec3d(0.f, 3.f, 0.f);
@@ -17,7 +25,12 @@ void Player::Start()
 		Physics::RigidBody* rb = scene->physics.createBody(playerObject, false, 1.0, r);
 		playerObject->physicsBody = rb;
 		if (rb) rb->vel = Vec3d(0.0);
-	} else if (scene) {
+		// Attach physics body to controller if possible
+		if (cameraController) {
+			cameraController->setPhysicsBody(rb);
+		}
+	}
+	else if (scene) {
 		// camera-only body: cylinder collider by default for better stepping.
 		// bodyRadius, bodyHeight come from Player instance defaults and can be tuned.
 		Physics::RigidBody* cb = scene->physics.createBody(nullptr, false, 1.0, bodyRadius, mainCamera.position, Physics::COLLIDER_CYLINDER, bodyHeight);
@@ -29,17 +42,23 @@ void Player::Start()
 			cameraController->setPhysicsBody(cameraBody);
 		}
 	}
+	else {
+		cameraBody = nullptr;
+		if (cameraController) {
+			cameraController->setPhysicsBody(nullptr);
+		}
+	}
 }
 
 void Player::Update(float dt)
 {
+	// ensure cameraController exists
+	if (!cameraController) return;
+
 	// choose the active rigid body (owned or camera-only)
 	Physics::RigidBody* rb = nullptr;
 	if (playerObject) rb = playerObject->physicsBody;
 	else rb = cameraBody;
-
-	// ensure cameraController exists
-	if (!cameraController) return;
 
 	// Input handling (mouse/keyboard)
 	int dx = 0, dy = 0;

@@ -98,17 +98,24 @@ static bool readFileToString(const std::string& path, std::string& out) {
 void SceneManager::clearScene() {
 	for (size_t i = 0; i < objects.size(); i++) {
 		delete objects[i];
+		objects[i] = nullptr;
 	}
+	objects.clear();
 
 	for (size_t i = 0; i < lightShadows.size(); i++) {
 		delete lightShadows[i];
 	}
-	
 	lightShadows.clear();
-	objects.clear();
+
 	selectedObject = nullptr;
 	grabbedAxisIndex = -1;
-	// Also clear lights when resetting the scene so loadScene replaces them
+	grabbedAxis = GizmoAxis();
+	axisGrabbed = false;
+	objectDrag = false;
+	dragPlaneNormal = Vec3d(0.0f);
+	dragInitialPoint = Vec3d(0.0f);
+	dragInitialObjPos = Vec3d(0.0f);
+
 	lights.clear();
 	selectedLightIndex = -1;
 }
@@ -435,51 +442,23 @@ static bool isAncestor(Object* node, Object* possibleAncestor) {
 }
 
 void SceneManager::setParent(Object* child, Object* parent) {
-	if (!child) return;
-	if (child == parent) return;
-
-	// Prevent cycles: don't make 'parent' a child of 'child'
-	if (parent && isAncestor(parent, child)) {
+	if (!child || child == parent) return;
+	// Prevent cycles
+	if (parent && child->isAncestorOf(parent)) {
 		std::cerr << "[SceneManager] setParent: would create cycle, rejecting\n";
 		return;
 	}
-
-	// Detach from previous parent (if any)
-	if (child->parent) {
-		child->parent->removeChild(child);
-		child->parent = nullptr;
-	}
-
-	// Attach to new parent
-	if (parent) {
-		bool found = false;
-		for (auto o : objects) if (o == parent) { found = true; break; }
-		if (!found) {
-			std::cerr << "[SceneManager] setParent: parent not in scene\n";
-			return;
-		}
-		// parent->addChild will set child's parent pointer
-		parent->addChild(child);
-	} else {
-		child->parent = nullptr;
-	}
+	child->setParent(parent);
 }
 
 void SceneManager::removeObject(Object* objPtr) {
 	if (!objPtr) return;
 
 	// Detach from parent if present
-	if (objPtr->parent) {
-		objPtr->parent->removeChild(objPtr);
-		objPtr->parent = nullptr;
-	}
+	objPtr->detachFromParent();
 
-	// Reparent or clear children to avoid dangling pointers.
-	// Here we simply un-parent them (make them roots). Alternative: delete recursively.
-	for (auto c : objPtr->children) {
-		if (c) c->parent = nullptr;
-	}
-	objPtr->children.clear();
+	// Optionally recursively delete all children
+	objPtr->removeAllChildren(true);
 
 	// remove physics body (if any)
 	physics.removeBody(objPtr);

@@ -33,6 +33,10 @@ public:
     void getViewportMouseUV(float& u, float& v) const { u = viewportMouseU; v = viewportMouseV; }
     bool isViewportMouseDown() const { return viewportMouseDown; }
 
+    bool playMode = false;
+    bool mouseLocked = false;
+    std::string playModeBackupScenePath;
+
 private:
     void MainMenu();
     void EditorGUI();
@@ -86,6 +90,8 @@ private:
     bool showPreferences;
     char externalEditorPath[512]; // path to external text editor executable
     int preferredGraphicsAPI = 0;
+
+    bool showAbout;
 
     Uint64 NOW = SDL_GetTicks();
     Uint64 LAST = 0;

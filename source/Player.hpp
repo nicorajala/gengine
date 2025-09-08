@@ -11,6 +11,8 @@ using namespace NMATH;
 
 class Player {
 public:
+    ~Player();
+
     void Start();
     void Update(float dt);
 

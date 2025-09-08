@@ -20,6 +20,9 @@ Object::Object() {
 }
 
 Object::~Object() {
+    detachFromParent();
+    removeAllChildren(true);
+
     // Safely release GL resources if they were created.
     if (textureID != 0) {
         if (glIsTexture(textureID)) glDeleteTextures(1, &textureID);
@@ -54,6 +57,67 @@ void Object::removeChild(Object* child) {
             children.erase(it);
             child->parent = nullptr;
             return;
+        }
+    }
+}
+
+void Object::detachFromParent() {
+    if (parent) {
+        parent->removeChild(this);
+        parent = nullptr;
+    }
+}
+
+void Object::removeAllChildren(bool recursive) {
+    for (auto* c : children) {
+        if (c) {
+            c->parent = nullptr;
+            if (recursive) {
+                c->removeAllChildren(true);
+                delete c;
+            }
+        }
+    }
+    children.clear();
+}
+
+void Object::setParent(Object* newParent) {
+    if (newParent == this || isAncestorOf(newParent)) return;
+    detachFromParent();
+    if (newParent) newParent->addChild(this);
+}
+
+bool Object::isAncestorOf(const Object* possibleDescendant) const {
+    if (!possibleDescendant) return false;
+    const Object* p = possibleDescendant->parent;
+    while (p) {
+        if (p == this) return true;
+        p = p->parent;
+    }
+    return false;
+}
+
+bool Object::isDescendantOf(const Object* possibleAncestor) const {
+    if (!possibleAncestor) return false;
+    const Object* p = parent;
+    while (p) {
+        if (p == possibleAncestor) return true;
+        p = p->parent;
+    }
+    return false;
+}
+
+Object* Object::getRoot() {
+    Object* root = this;
+    while (root->parent) root = root->parent;
+    return root;
+}
+
+void Object::getAllDescendants(std::vector<Object*>& out) const {
+    for (auto* c : children) {
+        if (c) {
+            out.push_back(c);
+            c->getAllDescendants(out);
         }
     }
 }

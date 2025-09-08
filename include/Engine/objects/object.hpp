@@ -10,6 +10,8 @@ using namespace NMATH;
 
 namespace Physics { struct RigidBody; }
 
+class Object;
+
 class Object {
 public:
 	Vec3d position;
@@ -35,7 +37,18 @@ public:
 	std::vector<unsigned int> indices;
 
 	Object();
-	~Object();
+	virtual ~Object();
+
+	void addChild(Object* child);
+	void removeChild(Object* child);
+
+	void detachFromParent();
+	void removeAllChildren(bool recursive = false);
+	void setParent(Object* neParent);
+	bool isAncestorOf(const Object* possibleDescendant) const;
+	bool isDescendantOf(const Object* possibleAncestor) const;
+	Object* getRoot();
+	void getAllDescendants(std::vector<Object*>& outDescendants) const;
 
 	void initCube(float size);
 	void initCylinder(float radius, float height, int segments);
@@ -46,10 +59,6 @@ public:
 
 	void setupMesh();
 	Mat4 getModelMatrix() const; // returns world model matrix (composed with parents)
-
-	// simple helpers to manage children (SceneManager will call these too)
-	void addChild(Object* child);
-	void removeChild(Object* child);
 
 	void texture(const std::string& path);
 	void draw() const;

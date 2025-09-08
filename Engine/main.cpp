@@ -75,7 +75,7 @@ int main(int argc, char* argv[]) {
 		SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 		SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-		window = SDL_CreateWindow("GENGINE", 100, 100,
+		window = SDL_CreateWindow("SOULCRUSHER", 100, 100,
 											1024, 768,
 											SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
 
@@ -182,7 +182,7 @@ int main(int argc, char* argv[]) {
 	glBindTexture(GL_TEXTURE_2D, 0);
 
 	const GLubyte* glver = glGetString(GL_VERSION);
-	SDL_SetWindowTitle(window, ("GENGINE - Editor (OpenGL " + std::string((const char*)glver) + ")").c_str());
+	SDL_SetWindowTitle(window, ("SOULCRUSHER - Editor (OpenGL " + std::string((const char*)glver) + ")").c_str());
 
 	GameMain game;
 
@@ -243,15 +243,18 @@ int main(int argc, char* argv[]) {
 		while (SDL_PollEvent(&event)) {
 			ImGui_ImplSDL2_ProcessEvent(&event);
 			if (event.type == SDL_QUIT) running = false;
-			inputHandler.handleEvent(event, window);
 
-			if (game_mode && event.type == SDL_MOUSEMOTION && game.player->cameraController) {
-				// event.motion.xrel / yrel contain the relative motion when relative mode is enabled.
-				game.player->cameraController->onMouseMotion((int)event.motion.xrel, (int)event.motion.yrel);
+			if (!game_mode && editor && editor->playMode) {
+				if (event.type == SDL_MOUSEMOTION && game.player->cameraController) {
+					game.player->cameraController->onMouseMotion((int)event.motion.xrel, (int)event.motion.yrel);
+				}
+			}
+			else {
+				inputHandler.handleEvent(event, window);
 			}
 		}
 
-		if(game_mode) {
+		if(game_mode || (editor && editor->playMode)) {
 			game.Update(deltaTime);
 		}
 
@@ -293,16 +296,28 @@ int main(int argc, char* argv[]) {
 		Mat4 view;
 		Mat4 projection;
 		if (!game_mode) {
-			view = lookAt(inputHandler.cameraPos,
-						  inputHandler.cameraPos + inputHandler.cameraFront,
-						  inputHandler.cameraUp);
-			projection = perspective(radians(45.0f),
-				(float)viewportWidth / (float)viewportHeight,
-				0.1f, 100.0f);
-		} else {
+			if (editor && editor->playMode) {
+				// Play mode: use game camera
+				view = lookAt(game.player->mainCamera.position,
+					game.player->mainCamera.position + game.player->mainCamera.forward(),
+					Vec3d(0.0f, 1.0f, 0.0f));
+				projection = game.player->mainCamera.getProjectionMatrix((float)viewportWidth / (float)viewportHeight);
+			}
+			else {
+				// Editor mode: use editor camera
+				view = lookAt(inputHandler.cameraPos,
+					inputHandler.cameraPos + inputHandler.cameraFront,
+					inputHandler.cameraUp);
+				projection = perspective(radians(45.0f),
+					(float)viewportWidth / (float)viewportHeight,
+					0.1f, 100.0f);
+			}
+		}
+		else {
+			// Standalone game mode
 			view = lookAt(game.player->mainCamera.position,
-						  game.player->mainCamera.position + game.player->mainCamera.forward(),
-						  Vec3d(0.0f, 1.0f, 0.0f));
+				game.player->mainCamera.position + game.player->mainCamera.forward(),
+				Vec3d(0.0f, 1.0f, 0.0f));
 			projection = game.player->mainCamera.getProjectionMatrix((float)viewportWidth / (float)viewportHeight);
 		}
 
@@ -349,7 +364,7 @@ int main(int argc, char* argv[]) {
 		
 		game.scene->render(shaderProgram, view, projection);
 
-		if(!game_mode) {
+		if (!game_mode && editor && !editor->playMode) {
 			GLuint activeForEditor = game.scene->getActiveProgram();
 			if (activeForEditor == 0) activeForEditor = shaderProgram;
 			game.scene->drawGrid(activeForEditor, view, projection);
