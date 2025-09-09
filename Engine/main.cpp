@@ -26,6 +26,7 @@
 #include "Engine/objects/shapegen.hpp"
 
 #include "GameMain.hpp"
+#include "Engine/Game.hpp"
 
 using namespace NMATH;
 
@@ -215,7 +216,11 @@ int main(int argc, char* argv[]) {
 				}
 			}
 		}
-		game.Start();
+
+		if (game_mode || (editor && editor->playMode)) {
+			game.Start();
+			if (game.player) game.player->Start();
+		}
 
 		for (auto* o : game.scene->objects) {
 			if (o) {
@@ -243,18 +248,11 @@ int main(int argc, char* argv[]) {
 		while (SDL_PollEvent(&event)) {
 			ImGui_ImplSDL2_ProcessEvent(&event);
 			if (event.type == SDL_QUIT) running = false;
-
-			if (!game_mode && editor && editor->playMode) {
-				if (event.type == SDL_MOUSEMOTION && game.player->cameraController) {
-					game.player->cameraController->onMouseMotion((int)event.motion.xrel, (int)event.motion.yrel);
-				}
-			}
-			else {
-				inputHandler.handleEvent(event, window);
-			}
+			inputHandler.handleEvent(event, window);
 		}
 
 		if(game_mode || (editor && editor->playMode)) {
+			if(game.player) game.player->Update(deltaTime);
 			game.Update(deltaTime);
 		}
 
@@ -297,14 +295,12 @@ int main(int argc, char* argv[]) {
 		Mat4 projection;
 		if (!game_mode) {
 			if (editor && editor->playMode) {
-				// Play mode: use game camera
 				view = lookAt(game.player->mainCamera.position,
 					game.player->mainCamera.position + game.player->mainCamera.forward(),
 					Vec3d(0.0f, 1.0f, 0.0f));
 				projection = game.player->mainCamera.getProjectionMatrix((float)viewportWidth / (float)viewportHeight);
 			}
 			else {
-				// Editor mode: use editor camera
 				view = lookAt(inputHandler.cameraPos,
 					inputHandler.cameraPos + inputHandler.cameraFront,
 					inputHandler.cameraUp);

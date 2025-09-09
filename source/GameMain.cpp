@@ -99,15 +99,10 @@ void GameMain::Start()
 		scene->recreatePhysicsBody(floor);
 		if (floor->physicsBody) floor->physicsBody->isStatic = true;
 	}
-
-	// Now initialize the player (will create camera or object body)
-	player->Start();
 }
 
 void GameMain::Update(float dt)
 {
-	player->Update(dt);
-
 	if (scene) scene->update(dt);
 
 	static float debugAccum = 0.0f;

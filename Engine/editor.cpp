@@ -220,6 +220,7 @@ void Editor::Update() {
 				if (game && game->scene) {
 					game->scene->saveScene(playModeBackupScenePath);
 					game->Start();
+					if (game->player) game->player->Start();
 				}
 			}
 			ImGui::SameLine();
@@ -707,28 +708,6 @@ void Editor::EditorGUI() {
 			}
 
 			if (ImGui::CollapsingHeader("Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
-				Physics::World& world = game->scene->physics;
-				static bool physicsEnabled = world.enabled;
-				if (ImGui::Checkbox("Enable Physics", &physicsEnabled)) {
-					world.setEnabled(physicsEnabled);
-				}
-				Vec3d g = world.gravity;
-				if (ImGui::DragFloat3("Gravity", &g.x, 0.1f, -100.0f, 100.0f)) {
-					world.setGravity(g);
-				}
-				float rest = (float)world.restitution;
-				if (ImGui::SliderFloat("Restitution", &rest, 0.0f, 1.0f)) {
-					world.setRestitution(rest);
-				}
-				float corr = (float)world.positionalCorrection;
-				if (ImGui::SliderFloat("Positional Correction", &corr, 0.0f, 1.0f)) {
-					world.setPositionalCorrection(corr);
-				}
-				float fric = (float)world.friction;
-				if (ImGui::SliderFloat("Friction", &fric, 0.0f, 1.0f)) {
-					world.setFriction(fric);
-				}
-				// Per-object physics (if selected)
 				if (game->scene->selectedObject && game->scene->selectedObject->physicsBody) {
 					Physics::RigidBody* rb = game->scene->selectedObject->physicsBody;
 					ImGui::Separator();
@@ -765,7 +744,7 @@ void Editor::EditorGUI() {
 			}
 		}
 
-		if (game && game->player) {
+		if (game && game->player && obj->type != "World") {
 			ImGui::Separator();
 			ImGui::Text("Player Binding:");
 			if (game->player->playerObject == obj) {
@@ -797,7 +776,7 @@ void Editor::EditorGUI() {
 		}
 
 		if (obj->type == "World") {
-			if (ImGui::CollapsingHeader("World Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+			if (ImGui::CollapsingHeader("Sky Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
 				SceneManager* scene = game->scene;
 				if (!scene) { ImGui::Text("No scene available"); }
 				else {
@@ -844,6 +823,34 @@ void Editor::EditorGUI() {
 						ImGui::Text("Preview:");
 						ImGui::Image((void*)(intptr_t)scene->getSkyboxTextureID(), ImVec2(256, 128));
 					}
+				}
+			}
+			if (ImGui::CollapsingHeader("World Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
+				Physics::World& world = game->scene->physics;
+				static bool physicsEnabled = world.enabled;
+				if (ImGui::Checkbox("Enable Physics", &physicsEnabled)) {
+					world.setEnabled(physicsEnabled);
+				}
+				Vec3d g = world.gravity;
+				if (ImGui::DragFloat3("Gravity", &g.x, 0.1f, -100.0f, 100.0f)) {
+					world.setGravity(g);
+				}
+				float rest = (float)world.restitution;
+				if (ImGui::SliderFloat("Restitution", &rest, 0.0f, 1.0f)) {
+					world.setRestitution(rest);
+				}
+				float corr = (float)world.positionalCorrection;
+				if (ImGui::SliderFloat("Positional Correction", &corr, 0.0f, 1.0f)) {
+					world.setPositionalCorrection(corr);
+				}
+				float fric = (float)world.friction;
+				if (ImGui::SliderFloat("Friction", &fric, 0.0f, 1.0f)) {
+					world.setFriction(fric);
+				}
+			}
+			if (ImGui::CollapsingHeader("Player properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+				if (ImGui::Checkbox("Render player model", &game->scene->drawPlayerModel)) {
+					// toggle
 				}
 			}
 		}

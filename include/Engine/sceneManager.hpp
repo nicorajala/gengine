@@ -99,6 +99,7 @@ public:
 
 	// Debug: draw wireframe representation of collision shapes when true
 	bool drawColliders = false;
+	bool drawPlayerModel = true;
 
 	// Ensure a physics body matches the current object (recreate with current scale/type/position).
 	// Call after you change position/scale/type manually.

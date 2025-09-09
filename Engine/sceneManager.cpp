@@ -867,6 +867,8 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 		Mat4 model = obj->getModelMatrix();
 		glUniformMatrix4fv(modelLoc, 1, GL_FALSE, model.value_ptr());
 
+		if (obj->type == "Player" && !drawPlayerModel) continue;
+
 		if (!depthPass) {
 			if (obj->textureID != 0) {
 				glActiveTexture(GL_TEXTURE0);
@@ -884,7 +886,6 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 
 		// Ensure object has mesh data and GL resources before drawing
 		if (obj->vertices.empty() || obj->indices.empty()) {
-			if (obj->type == "World") continue;
 			//std::cerr << "[SceneManager] Skipping object " << oi << " - empty mesh data\n";
 			continue;
 		}
@@ -1285,10 +1286,25 @@ void SceneManager::saveScene(const std::string& path) {
 	}
 	j["skybox"] = sky;
 
+	json world;
+	world["gravity"] = { physics.gravity.x, physics.gravity.y, physics.gravity.z };
+	world["enabled"] = physics.enabled;
+	world["restitution"] = physics.restitution;
+	world["friction"] = physics.friction;
+	world["positionalCorrection"] = physics.positionalCorrection;
+	j["world"] = world;
+
+	json settings;
+	settings["drawPlayerModel"] = drawPlayerModel;
+	settings["drawColliders"] = drawColliders;
+	j["settings"] = settings;
+
+	// ... existing file write code ...
 	std::ofstream file(path);
 	if (file.is_open()) {
 		file << j.dump(4);
-	} else {
+	}
+	else {
 		std::cerr << "[saveScene] Failed to open " << path << " for writing\n";
 	}
 }
@@ -1435,6 +1451,23 @@ void SceneManager::loadScene(const std::string& path) {
 	} else {
 		// default behaviour: no skybox
 		clearSkybox();
+	}
+
+	if (j.find("world") != j.end() && j["world"].is_object()) {
+		const json& world = j["world"];
+		if (world.find("gravity") != j.end() && world["gravity"].size() == 3) {
+			physics.setGravity(Vec3d(world["gravity"][0], world["gravity"][1], world["gravity"][2]));
+		}
+		if (world.find("enabled") != j.end()) physics.setEnabled(world["enabled"]);
+		if (world.find("restitution") != j.end()) physics.setRestitution(world["restitution"]);
+		if (world.find("friction") != j.end()) physics.setFriction(world["friction"]);
+		if (world.find("positionalCorrection") != j.end()) physics.setPositionalCorrection(world["positionalCorrection"]);
+	}
+
+	if (j.find("settings") != j.end() && j["settings"].is_object()) {
+		const json& settings = j["settings"];
+		if (settings.find("drawPlayerModel") != j.end()) drawPlayerModel = settings["drawPlayerModel"];
+		if (settings.find("drawColliders") != j.end()) drawColliders = settings["drawColliders"];
 	}
 }
 
