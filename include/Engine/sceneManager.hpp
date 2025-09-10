@@ -111,17 +111,18 @@ public:
 	enum class SkyboxMode {
 		None,
 		Color,
-		Texture
+		Cubemap
 	};
 
 	SkyboxMode getSkyboxMode() const { return skyboxMode;  }
 	Vec3d getSkyboxColor() const { return skyboxColor; }
-	GLuint getSkyboxTextureID() const { return skyboxTextureID; }
-	const std::string& getSkyboxTexturePath() const { return skyboxTexturePath; }
+	GLuint getSkyboxCubemapID() const { return skyboxCubemapID; }
+	const std::vector<std::string>& getSkyboxCubemapPaths() const { return skyboxCubemapPaths; }
 
 	void setSkyboxColor(const Vec3d& color);
-	bool setSkyboxTexture(const std::string& path);
+	bool setSkyboxCubemap(const std::vector<std::string>& facePaths);
 	void clearSkybox();
+	void setSkyboxMode(SkyboxMode mode);
 
 private:
 	GLuint gridVAO = 0, gridVBO = 0;
@@ -130,13 +131,14 @@ private:
 
 	SkyboxMode skyboxMode = SkyboxMode::None;
 	Vec3d skyboxColor = Vec3d(0.5f, 0.7f, 1.0f);
-	GLuint skyboxTextureID = 0;
-	std::string skyboxTexturePath = "";
+	GLuint skyboxCubemapID = 0;
+	std::vector<std::string> skyboxCubemapPaths;
 
 	GLuint skyboxVAO = 0, skyboxVBO = 0;
 
 	// TODO: move to nsmlib?
 	GLuint loadTextureFromFile(const std::string& path);
+	GLuint loadCubemap(const std::vector<std::string>& faces);
 };
 
 #endif

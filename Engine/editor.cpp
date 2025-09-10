@@ -781,47 +781,60 @@ void Editor::EditorGUI() {
 				if (!scene) { ImGui::Text("No scene available"); }
 				else {
 					// Mode selector
-					int mode = static_cast<int>(scene->getSkyboxMode());
-					const char* modes[] = { "None", "Color", "Texture" };
+					SceneManager::SkyboxMode currentMode = scene->getSkyboxMode();
+					int mode = static_cast<int>(currentMode);
+					const char* modes[] = { "None", "Color", "Cubemap" };
 					if (ImGui::Combo("Skybox Mode", &mode, modes, IM_ARRAYSIZE(modes))) {
-						if (mode == 0) scene->clearSkybox();
-						else if (mode == 1) scene->setSkyboxColor(scene->getSkyboxColor()); // no-op but flips mode
-						else if (mode == 2) {
-							// keep current texture if present; otherwise user must set path below
-							if (scene->getSkyboxTextureID() == 0 && scene->getSkyboxTexturePath().empty()) {
-								// leave as-is until user applies a path
-							}
+						if (mode == 0 && currentMode != SceneManager::SkyboxMode::None) {
+							scene->clearSkybox();
+						} else if (mode == 1 && currentMode != SceneManager::SkyboxMode::Color) {
+							scene->setSkyboxColor(scene->getSkyboxColor());
+						} else if (mode == 2 && currentMode != SceneManager::SkyboxMode::Cubemap) {
+							scene->setSkyboxMode(SceneManager::SkyboxMode::Cubemap);
 						}
 					}
 
 					// Color picker (only meaningful if mode == Color)
-					Vec3d c = scene->getSkyboxColor();
-					float colArr[3] = { c.x, c.y, c.z };
-					if (ImGui::ColorEdit3("Sky Color", colArr)) {
-						scene->setSkyboxColor(Vec3d(colArr[0], colArr[1], colArr[2]));
-					}
-
-					// Texture path and apply button (only meaningful if mode == Texture)
-					// Re-use texPath buffer (it's used in object texture UI too)
-					// initialize texPath with scene texture if user just selected the world
-					if (scene->getSkyboxTexturePath().size() > 0 && texPath[0] == '\0') {
-						strncpy(texPath, scene->getSkyboxTexturePath().c_str(), sizeof(texPath)-1);
-						texPath[sizeof(texPath)-1] = '\0';
-					}
-					ImGui::InputText("Sky Texture Path", texPath, IM_ARRAYSIZE(texPath));
-					if (ImGui::Button("Apply Sky Texture")) {
-						if (fs::exists((std::string)texPath)) {
-							if (scene->setSkyboxTexture(texPath)) {
-								// done
-							} else {
-								std::cerr << "[Editor] Failed to set skybox texture: " << texPath << std::endl;
-							}
+					if (mode == 1) {
+						Vec3d c = scene->getSkyboxColor();
+						float colArr[3] = { c.x, c.y, c.z };
+						if (ImGui::ColorEdit3("Sky Color", colArr)) {
+							scene->setSkyboxColor(Vec3d(colArr[0], colArr[1], colArr[2]));
 						}
 					}
-					// Preview
-					if (scene->getSkyboxTextureID()) {
-						ImGui::Text("Preview:");
-						ImGui::Image((void*)(intptr_t)scene->getSkyboxTextureID(), ImVec2(256, 128));
+
+					// Cubemap path input (only if mode == Cubemap)
+					if (mode == 2) {
+						static char cubemapPaths[6][256] = { 0 };
+						static const char* faceNames[6] = {
+							"Right (+X)", "Left (-X)", "Top (+Y)", "Bottom (-Y)", "Front (+Z)", "Back (-Z)"
+						};
+
+						// Prefill with current cubemap paths if available
+						const std::vector<std::string>& currentPaths = scene->getSkyboxCubemapPaths();
+						for (int i = 0; i < 6; ++i) {
+							if (!currentPaths.empty() && i < (int)currentPaths.size() && cubemapPaths[i][0] == '\0') {
+								strncpy(cubemapPaths[i], currentPaths[i].c_str(), sizeof(cubemapPaths[i]) - 1);
+								cubemapPaths[i][sizeof(cubemapPaths[i]) - 1] = '\0';
+							}
+						}
+
+						for (int i = 0; i < 6; ++i) {
+							ImGui::InputText(faceNames[i], cubemapPaths[i], sizeof(cubemapPaths[i]));
+						}
+						if (ImGui::Button("Apply Cubemap")) {
+							std::vector<std::string> faces;
+							for (int i = 0; i < 6; ++i) faces.push_back(cubemapPaths[i]);
+							if (scene->setSkyboxCubemap(faces)) {
+								ImGui::TextColored(ImVec4(0, 1, 0, 1), "Cubemap loaded!");
+							}
+							else {
+								ImGui::TextColored(ImVec4(1, 0, 0, 1), "Failed to load cubemap.");
+							}
+						}
+						if (scene->getSkyboxCubemapID()) {
+							ImGui::Text("Cubemap loaded.");
+						}
 					}
 				}
 			}

@@ -36,6 +36,8 @@ int main(int argc, char* argv[]) {
 
 	bool game_mode = false;
 	std::string scenePath = "";
+	std::string projectPath = "";
+
 	for (int i = 1; i < argc; ++i) {
 		std::string a = argv[i];
 		if (a == "--game") {
@@ -52,9 +54,19 @@ int main(int argc, char* argv[]) {
 			scenePath = a.substr(key.size());
 			continue;
 		}
+		if (a == "--project" && i + 1 < argc) {
+			projectPath = std::string(argv[++i]);
+			continue;
+		}
+		const std::string projKey = "--project=";
+		if (a.size() > projKey.size() && a.compare(0, projKey.size(), projKey) == 0) {
+			projectPath = a.substr(projKey.size());
+			continue;
+		}
 	}
 
-	printf("[Main] Args: game_mode=%d scenePath='%s'\n", game_mode ? 1 : 0, scenePath.c_str());
+	printf("[Main] Args: game_mode=%d scenePath='%s' projectPath='%s'\n",
+		game_mode ? 1 : 0, scenePath.c_str(), projectPath.c_str());
 
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
 		std::cerr << "SDL could not initialize! " << SDL_GetError() << std::endl;
@@ -128,6 +140,19 @@ int main(int argc, char* argv[]) {
 	glEnable(GL_CULL_FACE);
 	glCullFace(GL_BACK);
 	glFrontFace(GL_CCW);
+
+	if (!projectPath.empty()) {
+#if defined(_WIN32)
+		SetCurrentDirectoryA(projectPath.c_str());
+#else
+		chdir(projectPath.c_str());
+#endif
+		// Optionally, auto-load a default scene in the project
+		std::string defaultScene = projectPath + "/scenes/scene.gscene";
+		if (fs::exists(defaultScene)) {
+			scenePath = defaultScene;
+		}
+	}
 
 	Shaderc ShaderCompiler;
 	GLuint shaderProgram = ShaderCompiler.loadShader("shaders/vertex.glsl", "shaders/fragment.glsl");

@@ -27,28 +27,32 @@ static GLuint s_wireProgram = 0;
 static time_t s_wireVertMtime = 0;
 static time_t s_wireFragMtime = 0;
 
+static GLuint s_skyboxShader = 0;
+static time_t s_skyboxVertMtime = 0;
+static time_t s_skyboxFragMtime = 0;
+
 SceneManager::SceneManager()
 		: selectedObject(NULL),
-			axisGrabbed(false),
-			grabbedAxisIndex(-1),
-			objectDrag(false),
-			dragPlaneNormal(Vec3d(0.0f)),
-			dragInitialPoint(Vec3d(0.0f)),
-			dragInitialObjPos(Vec3d(0.0f)),
-			axisGrabDistance(0.12f),
-			gizmoLineWidth(10.0f),
-			axisVAO(0), axisVBO(0),
-			lightVAO(0), lightVBO(0),
-			selectedLightIndex(-1),
-			objCounter(0),
-			gridVAO(0), gridVBO(0), gridVertexCount(0),
-			physics(), // default construct world
-			skyboxMode(SkyboxMode::None),
-			skyboxColor(Vec3d(0.53f, 0.81f, 0.92f)),
-			skyboxTextureID(0),
-			skyboxTexturePath(""),
-			skyboxVAO(0),
-			skyboxVBO(0)
+		axisGrabbed(false),
+		grabbedAxisIndex(-1),
+		objectDrag(false),
+		dragPlaneNormal(Vec3d(0.0f)),
+		dragInitialPoint(Vec3d(0.0f)),
+		dragInitialObjPos(Vec3d(0.0f)),
+		axisGrabDistance(0.12f),
+		gizmoLineWidth(10.0f),
+		axisVAO(0), axisVBO(0),
+		lightVAO(0), lightVBO(0),
+		selectedLightIndex(-1),
+		objCounter(0),
+		gridVAO(0), gridVBO(0), gridVertexCount(0),
+		physics(),
+		skyboxMode(SkyboxMode::None),
+		skyboxColor(Vec3d(0.53f, 0.81f, 0.92f)),
+		skyboxCubemapID(0),
+		skyboxCubemapPaths(),
+		skyboxVAO(0),
+		skyboxVBO(0)
 {
 	// Try relative path first (as before)
 	shadowDepthProgram = s_shaderCompiler.loadShader("shaders/shadows/shadow_depth_vert.glsl", "shaders/shadows/shadow_depth_frag.glsl");
@@ -462,7 +466,7 @@ void SceneManager::removeObject(Object* objPtr) {
 
 	// remove physics body (if any)
 	physics.removeBody(objPtr);
-	objPtr->physicsBody = nullptr;
+ objPtr->physicsBody = nullptr;
 
 	// remove from scene->objects
 	auto it = std::find(objects.begin(), objects.end(), objPtr);
@@ -537,46 +541,105 @@ GLuint SceneManager::loadTextureFromFile(const std::string& path) {
 	return tex;
 }
 
+GLuint SceneManager::loadCubemap(const std::vector<std::string>& faces) {
+    GLuint texID;
+    glGenTextures(1, &texID);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, texID);
+
+    int width, height, nrChannels;
+    for (GLuint i = 0; i < faces.size(); i++) {
+        unsigned char* data = stbi_load(faces[i].c_str(), &width, &height, &nrChannels, 0);
+        if (data) {
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+            stbi_image_free(data);
+        } else {
+            // handle error
+        }
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+    return texID;
+}
+
 void SceneManager::setSkyboxColor(const Vec3d& color) {
 	skyboxColor = color;
 	skyboxMode = SkyboxMode::Color;
-	// ensure we don't keep a texture bound if switching to color
-	if (skyboxTextureID != 0) {
-		glDeleteTextures(1, &skyboxTextureID);
-		skyboxTextureID = 0;
-		skyboxTexturePath.clear();
+	// Clean up cubemap if switching to color
+	if (skyboxCubemapID != 0) {
+		glDeleteTextures(1, &skyboxCubemapID);
+		skyboxCubemapID = 0;
+		skyboxCubemapPaths.clear();
 	}
 }
 
-bool SceneManager::setSkyboxTexture(const std::string& path) {
-	if (path.empty()) {
-		clearSkybox();
+bool SceneManager::setSkyboxCubemap(const std::vector<std::string>& faces) {
+	if (faces.size() != 6) {
+		std::cerr << "[SceneManager] setSkyboxCubemap: 6 faces required\n";
 		return false;
 	}
-	if (!std::ifstream(path).good()) {
-		std::cerr << "[SceneManager] Skybox texture file not found: " << path << std::endl;
-		return false;
+	for (const auto& f : faces) {
+		if (!std::ifstream(f).good()) {
+			std::cerr << "[SceneManager] Cubemap face not found: " << f << std::endl;
+			return false;
+		}
 	}
-	// load texture
-	GLuint newTex = loadTextureFromFile(path);
+	GLuint newTex = loadCubemap(faces);
 	if (newTex == 0) return false;
 
-	// free existing
-	if (skyboxTextureID != 0) glDeleteTextures(1, &skyboxTextureID);
+	if (skyboxCubemapID != 0) glDeleteTextures(1, &skyboxCubemapID);
 
-	skyboxTextureID = newTex;
-	skyboxTexturePath = path;
-	skyboxMode = SkyboxMode::Texture;
+	skyboxCubemapID = newTex;
+	skyboxCubemapPaths = faces;
+	skyboxMode = SkyboxMode::Cubemap;
 	return true;
 }
 
 void SceneManager::clearSkybox() {
-	if (skyboxTextureID != 0) {
-		glDeleteTextures(1, &skyboxTextureID);
-		skyboxTextureID = 0;
+	if (skyboxCubemapID != 0) {
+		glDeleteTextures(1, &skyboxCubemapID);
+		skyboxCubemapID = 0;
 	}
-	skyboxTexturePath.clear();
+	skyboxCubemapPaths.clear();
 	skyboxMode = SkyboxMode::None;
+}
+
+void SceneManager::setSkyboxMode(SkyboxMode mode) {
+	skyboxMode = mode;
+}
+
+GLuint getSkyboxShader() {
+    const char* vertPath = "shaders/skybox/vertex.glsl";
+    const char* fragPath = "shaders/skybox/fragment.glsl";
+
+    auto getMTime = [](const char* path)->time_t {
+        struct stat st;
+        if (stat(path, &st) == 0) return st.st_mtime;
+        return 0;
+    };
+
+    time_t vm = getMTime(vertPath);
+    time_t fm = getMTime(fragPath);
+
+    if (s_skyboxShader == 0 || vm != s_skyboxVertMtime || fm != s_skyboxFragMtime) {
+        if (s_skyboxShader != 0) {
+            glDeleteProgram(s_skyboxShader);
+            s_skyboxShader = 0;
+        }
+        GLuint prog = s_shaderCompiler.loadShader(vertPath, fragPath);
+        if (prog != 0) {
+            s_skyboxShader = prog;
+            s_skyboxVertMtime = vm;
+            s_skyboxFragMtime = fm;
+            std::cerr << "[SceneManager] Loaded skybox shader id=" << prog << std::endl;
+        } else {
+            std::cerr << "[SceneManager] Failed to load skybox shader!" << std::endl;
+        }
+    }
+    return s_skyboxShader;
 }
 
 void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& projection) {
@@ -652,84 +715,92 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 	glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
 
 	// Expose active program to editor (so gizmos/grid use the same)
-	lastActiveProgram = activeProgram;
+	lastActiveProgram = shaderProgram;
 
-	// Use the active program for the rest of the draw (unless depthPass early return)
-	glUseProgram(activeProgram);
+	glUseProgram(shaderProgram);
 
-	if (!depthPass) {
-		if (skyboxMode == SkyboxMode::Color) {
-			// clear color with sky color before drawing anything
-			glClearColor(skyboxColor.x, skyboxColor.y, skyboxColor.z, 1.0f);
-			glClear(GL_COLOR_BUFFER_BIT);
-		} else if (skyboxMode == SkyboxMode::Texture && skyboxTextureID != 0) {
-			// draw fullscreen textured quad (use unlit shader when available)
-			GLuint bgProgram = (s_unlitProgram != 0) ? s_unlitProgram : activeProgram;
+	if (skyboxMode == SkyboxMode::Color) {
+		glClearColor(skyboxColor.x, skyboxColor.y, skyboxColor.z, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+	}
+	else if (skyboxMode == SkyboxMode::Cubemap && skyboxCubemapID != 0) {
+		// Draw skybox cube with cubemap
+		static float skyboxVertices[] = {
+			// positions
+			-1.0f,  1.0f, -1.0f,
+			-1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+			 1.0f,  1.0f, -1.0f,
+			-1.0f,  1.0f, -1.0f,
 
-			// lazy-init fullscreen quad VAO/VBO (pos.xyz + uv.xy)
-			if (skyboxVAO == 0) {
-				float quadVerts[] = {
-					// x, y, z,   u, v
-					-1.0f, -1.0f, 0.0f,  0.0f, 0.0f,
-					 1.0f, -1.0f, 0.0f,  1.0f, 0.0f,
-					 1.0f,  1.0f, 0.0f,  1.0f, 1.0f,
-					-1.0f, -1.0f, 0.0f,  0.0f, 0.0f,
-					 1.0f,  1.0f, 0.0f,  1.0f, 1.0f,
-					-1.0f,  1.0f, 0.0f,  0.0f, 1.0f
-				};
-				glGenVertexArrays(1, &skyboxVAO);
-				glGenBuffers(1, &skyboxVBO);
-				glBindVertexArray(skyboxVAO);
-				glBindBuffer(GL_ARRAY_BUFFER, skyboxVBO);
-				glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_STATIC_DRAW);
-				// pos -> location 0 (vec3)
-				glEnableVertexAttribArray(0);
-				glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-				// texcoord -> location 3 (matching objects' texcoord layout)
-				glEnableVertexAttribArray(3);
-				glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-				glBindVertexArray(0);
-			}
+			-1.0f, -1.0f,  1.0f,
+			-1.0f, -1.0f, -1.0f,
+			-1.0f,  1.0f, -1.0f,
+			-1.0f,  1.0f, -1.0f,
+			-1.0f,  1.0f,  1.0f,
+			-1.0f, -1.0f,  1.0f,
 
-			// preserve GL state
-			GLboolean wasDepthEnabled = glIsEnabled(GL_DEPTH_TEST);
-			GLboolean prevDepthMask = GL_TRUE;
-			glGetBooleanv(GL_DEPTH_WRITEMASK, &prevDepthMask);
+			 1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
 
-			// draw
-			glUseProgram(bgProgram);
-			glDisable(GL_DEPTH_TEST);
-			glDepthMask(GL_FALSE);
+			-1.0f, -1.0f,  1.0f,
+			-1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f, -1.0f,  1.0f,
+			-1.0f, -1.0f,  1.0f,
 
-			// set identity matrices if the shader exposes them (safe to query)
-			Mat4 I = Mat4(1.0f);
-			GLint locModel = glGetUniformLocation(bgProgram, "model");
-			if (locModel >= 0) glUniformMatrix4fv(locModel, 1, GL_FALSE, I.value_ptr());
-			GLint locView = glGetUniformLocation(bgProgram, "view");
-			if (locView >= 0) glUniformMatrix4fv(locView, 1, GL_FALSE, I.value_ptr());
-			GLint locProj = glGetUniformLocation(bgProgram, "projection");
-			if (locProj >= 0) glUniformMatrix4fv(locProj, 1, GL_FALSE, I.value_ptr());
+			-1.0f,  1.0f, -1.0f,
+			 1.0f,  1.0f, -1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			-1.0f,  1.0f,  1.0f,
+			-1.0f,  1.0f, -1.0f,
 
-			// bind texture unit 0
-			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, skyboxTextureID);
-			GLint locTex = glGetUniformLocation(bgProgram, "uTexture");
-			if (locTex >= 0) glUniform1i(locTex, 0);
-			GLint locUseTex = glGetUniformLocation(bgProgram, "useTexture");
-			if (locUseTex >= 0) glUniform1i(locUseTex, 1);
-
+			-1.0f, -1.0f, -1.0f,
+			-1.0f, -1.0f,  1.0f,
+			 1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+			-1.0f, -1.0f,  1.0f,
+			 1.0f, -1.0f,  1.0f
+		};
+		if (skyboxVAO == 0) {
+			glGenVertexArrays(1, &skyboxVAO);
+			glGenBuffers(1, &skyboxVBO);
 			glBindVertexArray(skyboxVAO);
-			glDrawArrays(GL_TRIANGLES, 0, 6);
+			glBindBuffer(GL_ARRAY_BUFFER, skyboxVBO);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(skyboxVertices), &skyboxVertices, GL_STATIC_DRAW);
+			glEnableVertexAttribArray(0);
+			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
 			glBindVertexArray(0);
-
-			// restore uniforms/state
-			if (locUseTex >= 0) glUniform1i(locUseTex, 0);
-			glBindTexture(GL_TEXTURE_2D, 0);
-			glDepthMask(prevDepthMask);
-			if (wasDepthEnabled) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
-			// restore previous program (use saved prevProg)
-			glUseProgram((GLuint)prevProg);
 		}
+
+		GLuint skyboxShader = getSkyboxShader();
+		glUseProgram(skyboxShader);
+
+		Mat4 viewNoTrans = view;
+		viewNoTrans.m[3][0] = 0.0f;
+		viewNoTrans.m[3][1] = 0.0f;
+		viewNoTrans.m[3][2] = 0.0f;
+
+		glUniformMatrix4fv(glGetUniformLocation(skyboxShader, "view"), 1, GL_FALSE, viewNoTrans.value_ptr());
+		glUniformMatrix4fv(glGetUniformLocation(skyboxShader, "projection"), 1, GL_FALSE, projection.value_ptr());
+
+		glDepthFunc(GL_LEQUAL);
+		glBindVertexArray(skyboxVAO);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_CUBE_MAP, skyboxCubemapID);
+		glUniform1i(glGetUniformLocation(skyboxShader, "skybox"), 0);
+		glDrawArrays(GL_TRIANGLES, 0, 36);
+		glBindVertexArray(0);
+		glDepthFunc(GL_LESS);
+
+		glUseProgram(prevProg);
 	}
 	
 	if (!depthPass) {
@@ -1280,9 +1351,9 @@ void SceneManager::saveScene(const std::string& path) {
 	else if (skyboxMode == SkyboxMode::Color) {
 		sky["mode"] = "Color";
 		sky["color"] = { skyboxColor.x, skyboxColor.y, skyboxColor.z };
-	} else if (skyboxMode == SkyboxMode::Texture) {
-		sky["mode"] = "Texture";
-		sky["texturePath"] = skyboxTexturePath;
+	} else if (skyboxMode == SkyboxMode::Cubemap) {
+		sky["mode"] = "Cubemap";
+		sky["cubemapPaths"] = skyboxCubemapPaths;
 	}
 	j["skybox"] = sky;
 
@@ -1303,8 +1374,7 @@ void SceneManager::saveScene(const std::string& path) {
 	std::ofstream file(path);
 	if (file.is_open()) {
 		file << j.dump(4);
-	}
-	else {
+	} else {
 		std::cerr << "[saveScene] Failed to open " << path << " for writing\n";
 	}
 }
@@ -1442,14 +1512,16 @@ void SceneManager::loadScene(const std::string& path) {
 				Vec3d c = Vec3d((float)sky["color"][0], (float)sky["color"][1], (float)sky["color"][2]);
 				setSkyboxColor(c);
 			}
-		} else if (mode == "Texture") {
-			std::string tpath = sky.value("texturePath", "");
-			if (!tpath.empty()) setSkyboxTexture(tpath);
+		} else if (mode == "Cubemap") {
+			if (sky.find("cubemapPaths") != sky.end() && sky["cubemapPaths"].is_array() && sky["cubemapPaths"].size() == 6) {
+				std::vector<std::string> faces;
+				for (int i = 0; i < 6; ++i) faces.push_back(sky["cubemapPaths"][i]);
+				setSkyboxCubemap(faces);
+			}
 		} else {
 			clearSkybox();
 		}
 	} else {
-		// default behaviour: no skybox
 		clearSkybox();
 	}
 
