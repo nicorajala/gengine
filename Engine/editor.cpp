@@ -783,7 +783,7 @@ void Editor::EditorGUI() {
 					// Mode selector
 					SceneManager::SkyboxMode currentMode = scene->getSkyboxMode();
 					int mode = static_cast<int>(currentMode);
-					const char* modes[] = { "None", "Color", "Cubemap" };
+					const char* modes[] = { "None", "Color", "Cubemap", "Equirectangular"};
 					if (ImGui::Combo("Skybox Mode", &mode, modes, IM_ARRAYSIZE(modes))) {
 						if (mode == 0 && currentMode != SceneManager::SkyboxMode::None) {
 							scene->clearSkybox();
@@ -791,6 +791,8 @@ void Editor::EditorGUI() {
 							scene->setSkyboxColor(scene->getSkyboxColor());
 						} else if (mode == 2 && currentMode != SceneManager::SkyboxMode::Cubemap) {
 							scene->setSkyboxMode(SceneManager::SkyboxMode::Cubemap);
+						} else if (mode == 3 && currentMode != SceneManager::SkyboxMode::Equirectangular) {
+							scene->setSkyboxMode(SceneManager::SkyboxMode::Equirectangular);
 						}
 					}
 
@@ -805,6 +807,24 @@ void Editor::EditorGUI() {
 
 					// Cubemap path input (only if mode == Cubemap)
 					if (mode == 2) {
+						static char cubemap3x2Path[256] = { 0 };
+						ImGui::InputText("3x2 Cubemap Texture", cubemap3x2Path, sizeof(cubemap3x2Path));
+						if (ImGui::Button("Load Cubemap")) {
+							if (fs::exists((std::string)cubemap3x2Path)) {
+								bool ok = scene->setSkyboxCubemapFrom3x2((std::string)cubemap3x2Path);
+								if (ok) {
+									scene->setSkyboxMode(SceneManager::SkyboxMode::Cubemap);
+									ImGui::TextColored(ImVec4(0, 1, 0, 1), "Cubemap loaded from 3x2!");
+								}
+								else {
+									ImGui::TextColored(ImVec4(1, 0, 0, 1), "Failed to load 3x2 cubemap.");
+								}
+							}
+						}
+						if (scene->getSkyboxCubemapID()) {
+							ImGui::Text("Cubemap loaded.");
+						}
+
 						static char cubemapPaths[6][256] = { 0 };
 						static const char* faceNames[6] = {
 							"Right (+X)", "Left (-X)", "Top (+Y)", "Bottom (-Y)", "Front (+Z)", "Back (-Z)"
@@ -834,6 +854,25 @@ void Editor::EditorGUI() {
 						}
 						if (scene->getSkyboxCubemapID()) {
 							ImGui::Text("Cubemap loaded.");
+						}
+					}
+
+					if (mode == 3) {
+						static char cubemap3x2Path[256] = { 0 };
+						ImGui::InputText("Skybox Texture", cubemap3x2Path, sizeof(cubemap3x2Path));
+						if (ImGui::Button("Load Skybox")) {
+							if (fs::exists((std::string)cubemap3x2Path)) {
+								bool ok = scene->setSkyboxEquirectangular((std::string)cubemap3x2Path);
+								if (ok) {
+									scene->setSkyboxMode(SceneManager::SkyboxMode::Equirectangular);
+									ImGui::TextColored(ImVec4(0, 1, 0, 1), "Skybox loaded");
+								} else {
+									ImGui::TextColored(ImVec4(1, 0, 0, 1), "Failed to load skybox.");
+								}
+							}
+						}
+						if (scene->getSkyboxCubemapID()) {
+							ImGui::Text("Skybox loaded.");
 						}
 					}
 				}

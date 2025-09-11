@@ -1,15 +1,11 @@
 #version 120
-
 attribute vec3 aPos;
-varying vec3 TexCoords;
-
 uniform mat4 view;
 uniform mat4 projection;
+varying vec3 vWorldDir;
 
 void main() {
-    mat3 rotView = mat3(view); // remove translation
-    vec3 pos = aPos;
-    TexCoords = pos;
-    vec4 worldPos = projection * vec4(rotView * pos, 1.0);
-    gl_Position = worldPos.xyww;
+    vec4 pos = projection * view * vec4(aPos, 0.0);
+    gl_Position = pos.xyww;
+    vWorldDir = aPos;
 }

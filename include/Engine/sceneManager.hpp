@@ -111,7 +111,8 @@ public:
 	enum class SkyboxMode {
 		None,
 		Color,
-		Cubemap
+		Cubemap,
+		Equirectangular
 	};
 
 	SkyboxMode getSkyboxMode() const { return skyboxMode;  }
@@ -121,6 +122,8 @@ public:
 
 	void setSkyboxColor(const Vec3d& color);
 	bool setSkyboxCubemap(const std::vector<std::string>& facePaths);
+	bool setSkyboxCubemapFrom3x2(const std::string& path);
+	bool setSkyboxEquirectangular(const std::string& path);
 	void clearSkybox();
 	void setSkyboxMode(SkyboxMode mode);
 
@@ -132,6 +135,7 @@ private:
 	SkyboxMode skyboxMode = SkyboxMode::None;
 	Vec3d skyboxColor = Vec3d(0.5f, 0.7f, 1.0f);
 	GLuint skyboxCubemapID = 0;
+	GLuint skyboxEquirectID = 0;
 	std::vector<std::string> skyboxCubemapPaths;
 
 	GLuint skyboxVAO = 0, skyboxVBO = 0;

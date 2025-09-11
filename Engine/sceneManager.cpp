@@ -598,6 +598,102 @@ bool SceneManager::setSkyboxCubemap(const std::vector<std::string>& faces) {
 	return true;
 }
 
+bool SceneManager::setSkyboxCubemapFrom3x2(const std::string& path) {
+	if (skyboxCubemapID != 0) {
+		glDeleteTextures(1, &skyboxCubemapID);
+		skyboxCubemapID = 0;
+	}
+
+	int width, height, channels;
+	unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 0);
+	if (!data) {
+		std::cerr << "[SceneManager] stbi_load failed for: " << path << std::endl;
+		return false;
+	}
+
+	// Minimum size check
+	if (width < 3 || height < 2) {
+		std::cerr << "[SceneManager] Image too small for 3x2 cubemap: " << path << std::endl;
+		stbi_image_free(data);
+		return false;
+	}
+
+	int cellW = width / 3;
+	int cellH = height / 2;
+
+	int faceOffsets[6][2] = {
+		{0,0}, // +X (right)
+		{1,0}, // -X (left)
+		{2,0}, // +Y (top)
+		{0,1}, // -Y (bottom)
+		{1,1}, // +Z (front)
+		{2,1}  // -Z (back)
+	};
+
+	GLuint texID;
+	glGenTextures(1, &texID);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, texID);
+
+	for (int face = 0; face < 6; ++face) {
+		int ox = faceOffsets[face][0] * cellW;
+		int oy = faceOffsets[face][1] * cellH;
+
+		// Allocate a square buffer for the face (using the smaller of cellW/cellH)
+		int faceSize = std::min(cellW, cellH);
+		std::vector<unsigned char> faceData(faceSize * faceSize * channels, 0);
+
+		for (int y = 0; y < faceSize; ++y) {
+			int srcY = oy + y * cellH / faceSize;
+			for (int x = 0; x < faceSize; ++x) {
+				int srcX = ox + x * cellW / faceSize;
+				for (int c = 0; c < channels; ++c) {
+					faceData[(y * faceSize + x) * channels + c] =
+						data[((srcY * width) + srcX) * channels + c];
+				}
+			}
+		}
+
+		glTexImage2D(
+			GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0,
+			channels == 4 ? GL_RGBA : GL_RGB,
+			faceSize, faceSize, 0,
+			channels == 4 ? GL_RGBA : GL_RGB,
+			GL_UNSIGNED_BYTE, faceData.data()
+		);
+	}
+
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+	stbi_image_free(data);
+
+	this->skyboxCubemapID = texID;
+	this->skyboxMode = SkyboxMode::Cubemap;
+	this->skyboxCubemapPaths.clear();
+	this->skyboxCubemapPaths.push_back(path); // for info
+
+	return true;
+}
+
+bool SceneManager::setSkyboxEquirectangular(const std::string& path) {
+	GLuint tex = loadTextureFromFile(path);
+	if (tex == 0) return false;
+
+	if (skyboxEquirectID != 0) glDeleteTextures(1, &skyboxEquirectID);
+	skyboxEquirectID = tex;
+	skyboxMode = SkyboxMode::Equirectangular;
+
+	if (skyboxCubemapID != 0) {
+		glDeleteTextures(1, &skyboxCubemapID);
+		skyboxCubemapID = 0;
+		skyboxCubemapPaths.clear();
+	}
+	return true;
+}
+
 void SceneManager::clearSkybox() {
 	if (skyboxCubemapID != 0) {
 		glDeleteTextures(1, &skyboxCubemapID);
@@ -722,8 +818,7 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 	if (skyboxMode == SkyboxMode::Color) {
 		glClearColor(skyboxColor.x, skyboxColor.y, skyboxColor.z, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT);
-	}
-	else if (skyboxMode == SkyboxMode::Cubemap && skyboxCubemapID != 0) {
+	} else if (skyboxMode == SkyboxMode::Cubemap && skyboxCubemapID != 0) {
 		// Draw skybox cube with cubemap
 		static float skyboxVertices[] = {
 			// positions
@@ -801,6 +896,99 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 		glDepthFunc(GL_LESS);
 
 		glUseProgram(prevProg);
+	} else if (skyboxMode == SkyboxMode::Equirectangular && skyboxEquirectID != 0) {
+		static float skyboxVertices[] = {
+			-1.0f,  1.0f, -1.0f,
+			-1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+			 1.0f,  1.0f, -1.0f,
+			-1.0f,  1.0f, -1.0f,
+
+			-1.0f, -1.0f,  1.0f,
+			-1.0f, -1.0f, -1.0f,
+			-1.0f,  1.0f, -1.0f,
+			-1.0f,  1.0f, -1.0f,
+			-1.0f,  1.0f,  1.0f,
+			-1.0f, -1.0f,  1.0f,
+
+			 1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+
+			-1.0f, -1.0f,  1.0f,
+			-1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f, -1.0f,  1.0f,
+			-1.0f, -1.0f,  1.0f,
+
+			-1.0f,  1.0f, -1.0f,
+			 1.0f,  1.0f, -1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			-1.0f,  1.0f,  1.0f,
+			-1.0f,  1.0f, -1.0f,
+
+			-1.0f, -1.0f, -1.0f,
+			-1.0f, -1.0f,  1.0f,
+			 1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+			-1.0f, -1.0f,  1.0f,
+			 1.0f, -1.0f,  1.0f
+		};
+		if (skyboxVAO == 0) {
+			glGenVertexArrays(1, &skyboxVAO);
+			glGenBuffers(1, &skyboxVBO);
+			glBindVertexArray(skyboxVAO);
+			glBindBuffer(GL_ARRAY_BUFFER, skyboxVBO);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(skyboxVertices), &skyboxVertices, GL_STATIC_DRAW);
+			glEnableVertexAttribArray(0);
+			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+			glBindVertexArray(0);
+		}
+
+		// Load equirectangular skybox shader
+		static GLuint equirectShader = 0;
+		static time_t vertMtime = 0, fragMtime = 0;
+		const char* vertPath = "shaders/skybox/vertex.glsl";
+		const char* fragPath = "shaders/skybox/equirect_frag.glsl";
+		auto getMTime = [](const char* path)->time_t {
+			struct stat st;
+			if (stat(path, &st) == 0) return st.st_mtime;
+			return 0;
+			};
+		time_t vm = getMTime(vertPath);
+		time_t fm = getMTime(fragPath);
+		if (equirectShader == 0 || vm != vertMtime || fm != fragMtime) {
+			if (equirectShader != 0) glDeleteProgram(equirectShader);
+			equirectShader = s_shaderCompiler.loadShader(vertPath, fragPath);
+			vertMtime = vm;
+			fragMtime = fm;
+		}
+		glUseProgram(equirectShader);
+
+		Mat4 viewNoTrans = view;
+		viewNoTrans.m[0][3] = 0.0f;
+		viewNoTrans.m[1][3] = 0.0f;
+		viewNoTrans.m[2][3] = 0.0f;
+
+		glUniformMatrix4fv(glGetUniformLocation(equirectShader, "view"), 1, GL_FALSE, viewNoTrans.value_ptr());
+		glUniformMatrix4fv(glGetUniformLocation(equirectShader, "projection"), 1, GL_FALSE, projection.value_ptr());
+
+		glDepthFunc(GL_LEQUAL);
+		glBindVertexArray(skyboxVAO);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, skyboxEquirectID);
+		glUniform1i(glGetUniformLocation(equirectShader, "equirectMap"), 0);
+		glDrawArrays(GL_TRIANGLES, 0, 36);
+		glBindVertexArray(0);
+		glDepthFunc(GL_LESS);
+
+		glUseProgram(prevProg);
 	}
 	
 	if (!depthPass) {
@@ -810,13 +998,11 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 
 	glUseProgram(activeProgram);
 
-	// --- Ensure axis VAO/VBO exist (used for transform gizmo helper drawing in render)
 	if (axisVAO == 0) {
 		// create a simple three-axis line buffer (0->X, 0->Y, 0->Z)
 		Vec3d axisVerts[6] = {
 			Vec3d(0.0f,0.0f,0.0f), Vec3d(1.0f,0.0f,0.0f), // X
 			Vec3d(0.0f,0.0f,0.0f), Vec3d(0.0f,1.0f,0.0f), // Y
-			// will draw Z as two verts in second draw call (we store both pairs)
 		};
 		// expand to 6 verts (X,Y,Z)
 		Vec3d allVerts[6] = {

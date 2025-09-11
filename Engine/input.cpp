@@ -93,7 +93,6 @@ void EditorInput::handleViewportInput(Editor* editor, GameMain& game,
 
     Mat4 invPV = (projection * view).inverse();
 
-    // helper to convert clip/NDC space to world space (C++03-friendly)
     // defined inline to avoid exposing in header
     struct ClipToWorldHelper {
         static Vec3d convert(const Mat4& inv, float ndcX, float ndcY, float ndcZ) {
@@ -168,7 +167,10 @@ void EditorInput::handleViewportInput(Editor* editor, GameMain& game,
                 if (pitch < -limit) pitch = -limit;
                 Vec3d newFront = Vec3d((float)(cos(pitch)*cos(yaw)), (float)sin(pitch), (float)(cos(pitch)*sin(yaw))).normalized();
                 cameraFront = newFront;
-                cameraUp = Vec3d(0,1,0);
+
+                Vec3d worldUp(0.0f, 1.0f, 0.0f);
+                Vec3d right = cameraFront.cross(worldUp).normalized();
+                cameraUp = right.cross(cameraFront).normalized();
             }
             SDL_ShowCursor(SDL_FALSE);
         } else { SDL_ShowCursor(SDL_TRUE); }
