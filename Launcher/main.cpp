@@ -13,6 +13,24 @@
 
 static std::string projectsRoot = "Projects";
 static std::string editorExe = "GENGINE.exe";
+static std::string externalProjectsFile = "projects.ini";
+
+std::vector<fs::path> loadExternalProjects() {
+    std::vector<fs::path> result;
+    std::ifstream f(externalProjectsFile);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && fs::exists(fs::path(line) / "project.gproject"))
+            result.push_back(fs::path(line));
+    }
+    return result;
+}
+
+void saveExternalProjects(const std::vector<fs::path>& projects) {
+    std::ofstream f(externalProjectsFile, std::ios::trunc);
+    for (const auto& p : projects)
+        f << p.string() << "\n";
+}
 
 void ensureProjectsDir() {
     if (!fs::exists(projectsRoot)) fs::create_directory(projectsRoot);
@@ -38,6 +56,13 @@ bool createProject(const std::string& name, const std::string& location) {
     f.close();
     fs::create_directory(projPath / "scenes");
     fs::create_directory(projPath / "textures");
+    fs::path shadersSource = "shaders";
+    fs::path shadersDest = projPath / "shaders";
+    if (fs::exists(shadersSource)) {
+        fs::create_directory(shadersDest);
+        fs::copy(shadersSource, shadersDest, fs::copy_options_recursive);
+    }
+
     return true;
 }
 
@@ -94,6 +119,9 @@ int main() {
     std::string errorMsg;
     int selectedProject = -1;
 
+    int projectToRemove = -1;
+    bool showRemoveConfirm = false;
+
     while (!quit) {
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL2_ProcessEvent(&e);
@@ -115,13 +143,80 @@ int main() {
 
         ImGui::Begin("GENGINE Launcher", nullptr, flags);
 
-        ImGui::Text("Projects in '%s':", projectsRoot.c_str());
         auto projects = listProjects();
+        auto externalProjects = loadExternalProjects();
+        projects.insert(projects.end(), externalProjects.begin(), externalProjects.end());
+
+        if (ImGui::Button("Add existing project")) {
+            const char* folder = tinyfd_selectFolderDialog("Open project folder", NULL);
+            if (folder) {
+                fs::path projPath(folder);
+                if (fs::exists(projPath / "project.gproject")) {
+                    errorMsg.clear();
+                    bool alreadyListed = false;
+                    for (const auto& p : projects)
+                        if (p == projPath) alreadyListed = true;
+                    if (!alreadyListed) {
+                        auto externalProjects = loadExternalProjects();
+                        externalProjects.push_back(projPath);
+                        saveExternalProjects(externalProjects);
+                    }
+                }
+                else {
+                    errorMsg = "Selected folder is not a valid project.";
+                }
+            }
+        }
+
+        if (selectedProject >= 0 && selectedProject < (int)projects.size()) {
+            ImGui::SameLine();
+            if (ImGui::Button("Open in Editor")) {
+                launchEditor(projects[selectedProject]);
+            }
+        }
+
+        ImGui::Text("Projects:", projectsRoot.c_str());
         for (size_t i = 0; i < projects.size(); ++i) {
             std::string label = projects[i].filename().string();
             if (ImGui::Selectable(label.c_str(), selectedProject == (int)i)) {
                 selectedProject = (int)i;
             }
+
+            if (ImGui::BeginPopupContextItem()) {
+                if (ImGui::MenuItem("Remove from list")) {
+                    projectToRemove = (int)i;
+                    showRemoveConfirm = true;
+                }
+                ImGui::EndPopup();
+            }
+        }
+
+        if (showRemoveConfirm && projectToRemove >= 0 && projectToRemove < (int)projects.size()) {
+            ImGui::OpenPopup("Remove Project?");
+        }
+        if (ImGui::BeginPopupModal("Remove Project?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("This will only remove the project from the list.\nThe project folder will not be deleted.\n\nContinue?");
+            ImGui::Separator();
+
+            if (ImGui::Button("Yes", ImVec2(120, 0))) {
+                auto externalProjects = loadExternalProjects();
+                fs::path toRemove = projects[projectToRemove];
+                auto it = std::find(externalProjects.begin(), externalProjects.end(), toRemove);
+                if (it != externalProjects.end()) {
+                    externalProjects.erase(it);
+                    saveExternalProjects(externalProjects);
+                }
+                showRemoveConfirm = false;
+                projectToRemove = -1;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("No", ImVec2(120, 0))) {
+                showRemoveConfirm = false;
+                projectToRemove = -1;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
         }
 
         // Calculate the height needed for the bottom controls
@@ -135,7 +230,6 @@ int main() {
         if (contentRegionAvail > bottomControlsHeight)
             ImGui::Dummy(ImVec2(0, contentRegionAvail - bottomControlsHeight));
 
-        // --- Bottom controls ---
         ImGui::Separator();
         ImGui::InputText("New Project Name", newProjName, sizeof(newProjName));
         ImGui::InputText("Location", selectedFolder, sizeof(selectedFolder), ImGuiInputTextFlags_ReadOnly);
@@ -153,13 +247,6 @@ int main() {
                 errorMsg.clear();
                 strcpy(newProjName, "");
                 strcpy(selectedFolder, "");
-            }
-        }
-
-        if (selectedProject >= 0 && selectedProject < (int)projects.size()) {
-            ImGui::SameLine();
-            if (ImGui::Button("Open in Editor")) {
-                launchEditor(projects[selectedProject]);
             }
         }
 
