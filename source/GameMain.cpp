@@ -9,34 +9,32 @@ GameMain::GameMain() {
 	dirLight.direction = Vec3d(-0.2f,-1.0f,-0.3f);
 	scene->addLight(dirLight);
 
-	cube1 = scene->addObject("Cube", "Cube_1");
-	cube1->position = Vec3d(-5.f, 0.f, 0.f);
-	cube1->texture("textures/peppa.png");
+	// Different ways of adding objects to a scene from c++ (can and should be created in Start(), this is just for demo)
+	// Any objects created in the constructor must be deleted in the destructor
+	// Also any objects created here appear in the editor automatically. The ones created in Start() do not.
 
-	// Two ways of adding objects to a scene from c++
-	sphere1 = scene->addObject("Sphere", "Spheree");
-	sphere1->position = Vec3d(-5.f, 0.f, 5.f);
-	sphere1->scale = Vec3d(1.f);
-	sphere1->texture("textures/yoda.png");
+	//cube1 = scene->addObject("Cube", "Test cube");	// This is the simplest way of adding an object (remember to keep a pointer in the header)
 
-	floor = scene->addObject("Plane", "Floor");
-	floor->position = Vec3d(0.f, -1.f, 0.f);
-	floor->scale = Vec3d(50.f);
-	floor->texture("textures/yoda2.png");
-	floor->physicsBody->isStatic = true;
-	floor->physicsBody->height = 1;
+	//sphere1 = scene->addObject("Sphere", "Spheree");	// After creation you can modify different properties
+	//sphere1->position = Vec3d(-5.f, 0.f, 5.f);		// Move it somewhere
+	//sphere1->scale = Vec3d(1.f);						// Scale it
+	//sphere1->texture("textures/texture-image.png");	// Apply a texture etc.
 
-	Object* cylinder = new Object();
-	cylinder->initCylinder(0.5f, 2.0f, 16);
-	cylinder->name = "cylinderi";
-	cylinder->position = Vec3d(-2.f, 0.f, 2.f);
-	cylinder->texture("textures/yoda.png");
-	cylinder->physicsBody = scene->physics.createBody(cylinder, false, 1.0, 0.5, cylinder->position, Physics::COLLIDER_CYLINDER, 2.0);
-	scene->objects.push_back(cylinder);
 
-	Light pointLight(LightType::Point, Vec3d(1,1,1), 1.0f);
-	pointLight.position = Vec3d(5,0,0);
-	scene->addLight(pointLight);
+	// You can also create an object manually. This way is just what scene->addObject does internally.
+	//Object* cylinder = new Object;					// Create the object pointer. Should be done in the header file
+	//cylinder->initCylinder(radius, height, segments);	// You need to initialize its mesh
+														// By doing the initialization manually you can customize the meshes
+														// parameters on creation which gives you more flexibility than scene->addObject
+	//cylinder->name = "cylinder";						// After that you can set its properties just like any other object
+	//cylinder->position = Vec3d(-2.f, 0.f, 2.f);
+	//cylinder->texture("textures/texture-image.png");
+	//cylinder->physicsBody = scene->physics.createBody(cylinder,
+	// false, 1.0, 0.5, cylinder->position, Physics::COLLIDER_CYLINDER, 2.0);	// If you want physics on the object
+																				// you need to create the physics body manually
+																				// using the scene's physics
+																				// Read more about the parameters in the github wiki (When I make one).
+	//scene->objects.push_back(cylinder);				// Finally you need to add it to the scene's object list manually
 
 	player = new Player();
 }
@@ -51,9 +49,12 @@ GameMain::~GameMain()
 		scene = NULL;
 	}
 
-	cube1 = nullptr;
-	sphere1 = nullptr;
-	floor = nullptr;
+	// Ensure you delete any objects created in the constructor
+
+	// if(sphere1) { 
+	//		delete sphere1;
+	//		sphere1 = nullptr;
+	// }
 }
 
 void GameMain::Start()
@@ -92,12 +93,6 @@ void GameMain::Start()
 
 		// tell Player about it
 		player->cameraTargetObject = camTarget;
-	}
-
-	// Recreate floor body now that scale was set in constructor
-	if (floor) {
-		scene->recreatePhysicsBody(floor);
-		if (floor->physicsBody) floor->physicsBody->isStatic = true;
 	}
 }
 

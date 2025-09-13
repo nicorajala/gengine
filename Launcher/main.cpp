@@ -47,20 +47,101 @@ std::vector<fs::path> listProjects() {
     return result;
 }
 
+static std::string get_executable_dir() {
+#if defined(_WIN32)
+    char buf[MAX_PATH];
+    DWORD len = GetModuleFileNameA(NULL, buf, MAX_PATH);
+    if (len == 0) return std::string();
+    std::string s(buf, buf + len);
+#else
+    char buf[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len <= 0) return std::string();
+    std::string s(buf, buf + len);
+#endif
+    size_t pos = s.find_last_of("/\\");
+    if (pos == std::string::npos) return std::string(".");
+    return s.substr(0, pos);
+}
+
 bool createProject(const std::string& name, const std::string& location) {
     fs::path projPath = fs::path(location) / name;
     if (fs::exists(projPath)) return false;
-    fs::create_directory(projPath);
+
+    // Create project base and subfolders
+    if (!fs::create_directory(projPath)) {
+        std::cerr << "[createProject] FAILED to create project folder: " << projPath.string() << "\n";
+        return false;
+    }
     std::ofstream f(projPath / "project.gproject");
     f << "name=" << name << "\n";
     f.close();
-    fs::create_directory(projPath / "scenes");
-    fs::create_directory(projPath / "textures");
-    fs::path shadersSource = "shaders";
+    fs::create_directories(projPath / "scenes");
+    fs::create_directories(projPath / "textures");
+
+    // locate shaders source
+    fs::path shadersSource = "shaders"; // first try: relative cwd
+    std::cerr << "[createProject] cwd: " << fs::current_path() << "\n";
+    std::cerr << "[createProject] exists(\"shaders\")? " << (fs::exists(shadersSource) ? "yes" : "no") << "\n";
+
+    if (!fs::exists(shadersSource)) {
+        std::string exeDir = get_executable_dir();
+        if (!exeDir.empty()) {
+            fs::path candidate = fs::path(exeDir) / "shaders";
+            std::cerr << "[createProject] trying exe-dir candidate: " << candidate.string() << "\n";
+            if (fs::exists(candidate)) shadersSource = candidate;
+        }
+    }
+
+    // try one level up from exe
+    if (!fs::exists(shadersSource)) {
+        std::string exeDir = get_executable_dir();
+        if (!exeDir.empty()) {
+            fs::path candidate = fs::path(exeDir) / ".." / "shaders";
+            std::string candS = candidate.string();
+            std::cerr << "[createProject] trying exe-dir ../ candidate: " << candS << "\n";
+            if (fs::exists(candidate)) shadersSource = candidate;
+        }
+    }
+
     fs::path shadersDest = projPath / "shaders";
-    if (fs::exists(shadersSource)) {
-        fs::create_directory(shadersDest);
-        fs::copy(shadersSource, shadersDest, fs::copy_options_recursive);
+
+    if (!fs::exists(shadersSource)) {
+        std::cerr << "[createProject] NO shaders source found. Tried: 'shaders' and exe-relative locations. Skipping copy.\n";
+        return true; // project created, but no shaders copied
+    }
+
+    // Ensure destination exists
+    if (!fs::create_directories(shadersDest)) {
+        std::cerr << "[createProject] FAILED to create shaders destination: " << shadersDest.string() << "\n";
+    }
+
+    // Try high level copy + overwrite
+    bool ok = fs::copy(shadersSource, shadersDest,
+                       fs::copy_options_recursive | fs::copy_options_overwrite_existing);
+    if (ok) {
+        std::cerr << "[createProject] shaders copied OK from " << shadersSource.string() << " -> " << shadersDest.string() << "\n";
+        return true;
+    }
+
+    // Fallback: manual iterate & copy
+    std::cerr << "[createProject] fs::copy failed, falling back to manual copy.\n";
+    fs::directory_iterator dit(shadersSource);
+    for (auto it = dit.begin(); it != dit.end(); it++) {
+        fs::path child = it->getpath();
+        fs::path destChild = shadersDest / child.filename();
+        if (it->is_directory()) {
+            fs::create_directories(destChild);
+            if (!fs::copy(child, destChild, fs::copy_options_recursive | fs::copy_options_overwrite_existing)) {
+                std::cerr << "[createProject] failed to copy directory: " << child.string() << "\n";
+            }
+        } else {
+            if (!fs::copy_file(child, destChild, fs::copy_options_overwrite_existing)) {
+                std::cerr << "[createProject] failed to copy file: " << child.string() << " -> " << destChild.string() << "\n";
+            } else {
+                std::cerr << "[createProject] copied file: " << child.string() << " -> " << destChild.string() << "\n";
+            }
+        }
     }
 
     return true;
