@@ -174,7 +174,7 @@ int main(int argc, char* argv[]) {
 	bool running = true;
 	SDL_Event event;
 
-	Editor* editor;
+	Editor* editor = nullptr;
 
 	bool prevViewportMouseDown = false;
 
@@ -256,6 +256,7 @@ int main(int argc, char* argv[]) {
 		SDL_SetRelativeMouseMode(SDL_TRUE);
 	} else {
 		editor = new Editor(window, &game, editorWidth);
+		if (!projectPath.empty()) editor->currentProjectPath = projectPath;
 		editor->setViewportTexture(viewportTexture, viewportW, viewportH);
 		game.scene->initGrid(50, 1.f);
 		game.scene->initLightGizmo();

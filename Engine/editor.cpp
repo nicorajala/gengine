@@ -311,22 +311,9 @@ void Editor::setViewportTexture(GLuint tex, int w, int h) {
 void Editor::MainMenu() {
 	if (ImGui::BeginMainMenuBar()) {
 		if (ImGui::BeginMenu("File")) {
-			if (ImGui::MenuItem("New Project")) {
-				const char* newProjName = "MyProject";
-				fs::create_directory((std::string)newProjName);
-				std::ofstream projFile(newProjName + std::string("/project.gproject"));
-				projFile << "name=" << newProjName << "\n";
-				projFile.close();
-				currentProjectPath = newProjName;
-			}
-			if (ImGui::MenuItem("Load Project")) {
-				std::string path = "MyProject";
-				if (fs::exists(path + "/project.gproject")) currentProjectPath = path;
-			}
 			if (ImGui::MenuItem("Save Scene")) SaveScene();
 			if (ImGui::MenuItem("Load Scene")) LoadScene();
 
-			// Build entry
 			if (ImGui::MenuItem("Build")) {
 				showBuildWindow = true;
 			}
@@ -1246,7 +1233,7 @@ void Editor::ProjectGUI() {
 
 	ImGui::SameLine();
 	ImGui::PushID("Splitter");
-	ImGui::InvisibleButton("##splitter", ImVec2(5, -1));
+	ImGui::Button("##splitter", ImVec2(5, -1));
 	if (ImGui::IsItemActive()) {
 		treeWidth += ImGui::GetIO().MouseDelta.x;
 		if (treeWidth < minWidth) treeWidth = minWidth;
@@ -1268,9 +1255,8 @@ void Editor::ProjectGUI() {
 				if (ImGui::Selectable(name.c_str(), sel)) {
 					selectedFile = entry.getpath().string();
 				}
-				// double-click behavior in list panel as well
 				if (!isDir && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-					std::string ext = toLower(entry.getpath().string());
+					std::string ext = toLower(entry.path_().extension().string());
 					if (ext == ".gscene") {
 						game->scene->loadScene(entry.getpath().string());
 					} else {
@@ -1294,9 +1280,14 @@ void Editor::ProjectGUI() {
 			}
 
 			if (ImGui::BeginDragDropSource()) {
-				ImGui::SetDragDropPayload("DND_FILE", entry.getpath().string().c_str(),
-										   entry.getpath().string().size() + 1);
-				ImGui::Text("%s", name.c_str());
+				std::string fpath = entry.getpath().string();
+				if (fpath.empty()) fpath = ".";
+				ImGui::SetDragDropPayload(
+					"DND_FILE",
+					fpath.data(),
+					fpath.size() + 1
+				);
+				ImGui::Text("%s", fpath.c_str());
 				ImGui::EndDragDropSource();
 			}
 
@@ -1330,7 +1321,6 @@ void Editor::LoadScene() {
 	game->scene->loadScene(currentProjectPath+"/scene.gscene");
 }
 
-// Preferences persistence (very small key=value file in cwd)
 void Editor::SavePreferences() {
 	try {
 		std::ofstream f("editor_prefs.cfg", std::ios::out | std::ios::trunc);

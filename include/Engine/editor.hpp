@@ -36,6 +36,7 @@ public:
     bool playMode = false;
     bool mouseLocked = false;
     std::string playModeBackupScenePath;
+    std::string currentProjectPath;
 
 private:
     void MainMenu();
@@ -63,7 +64,6 @@ private:
     float viewportMouseV;
     bool viewportMouseDown;
 
-    std::string currentProjectPath;
     std::string selectedFile;
     std::vector<std::string> projectFiles;
 
