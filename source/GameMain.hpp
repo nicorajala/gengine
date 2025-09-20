@@ -2,6 +2,7 @@
 #define GAME_MAIN_HPP
 
 #include <Engine/game.hpp>
+
 #include "Player.hpp"
 
 class GameMain : public Game {
@@ -15,10 +16,10 @@ public:
     SceneManager* scene;
     Player* player;
 
-    //Object* floor;
-    Object* cube1;
-    Object* sphere1;
-    Object* floor;
+    // When creating objects from code, it is recommended
+    // to keep the object pointers in the header file
+
+    // Object* sphere1;
 };
 
 #endif

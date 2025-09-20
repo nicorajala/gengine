@@ -3,13 +3,19 @@
 
 #include "Engine/sceneManager.hpp"
 
-class Player {
+#include "Engine/game.hpp"
+
+#include "math/math.hpp"
+using namespace NMATH;
+
+class Player : public PlayerBase {
 public:
-    void Start();
-    void Update(float dt);
+    ~Player();
 
-    Object* playerObject;
+    void OnStart() override;
+    void OnUpdate(float dt) override;
 
+    Object* cameraTargetObject = nullptr;
 };
 
 #endif

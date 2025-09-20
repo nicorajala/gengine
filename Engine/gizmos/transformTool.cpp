@@ -2,47 +2,6 @@
 #include "Engine/objects/shapegen.hpp"
 #include <vector>
 
-// Will be moved to shapegen/objects and added as a spawnable object when I'm less lazy
-static std::vector<float> generateConeMesh(const Vec3d& baseCenter, const Vec3d& tip, float baseRadius, int segments) {
-    std::vector<float> verts;
-    if (segments < 3) segments = 3;
-
-    Vec3d dir = (tip - baseCenter).normalized();
-
-    Vec3d up(0, 1, 0);
-    if (fabs(dir.dot(up)) > 0.99f) up = Vec3d(1, 0, 0);
-
-    Vec3d side = dir.cross(up).normalized();
-    Vec3d up2 = side.cross(dir).normalized();
-
-    std::vector<Vec3d> ring(segments);
-    for (int i = 0; i < segments; ++i) {
-        float theta = 2.0f * PI * (float)i / (float)segments;
-        float c = cosf(theta);
-        float s = sinf(theta);
-        Vec3d radial = side * c + up2 * s;
-        ring[i] = baseCenter + radial * baseRadius;
-    }
-
-    // Side triangles: apex, ring[i], ring[i+1]
-    for (int i = 0; i < segments; ++i) {
-        int ni = (i + 1) % segments;
-        verts.push_back((float)tip.x);      verts.push_back((float)tip.y);      verts.push_back((float)tip.z);
-        verts.push_back((float)ring[i].x);  verts.push_back((float)ring[i].y);  verts.push_back((float)ring[i].z);
-        verts.push_back((float)ring[ni].x); verts.push_back((float)ring[ni].y); verts.push_back((float)ring[ni].z);
-    }
-
-    // Optional base cap (to fill the base): fan triangles baseCenter, ring[ni], ring[i]
-    for (int i = 0; i < segments; ++i) {
-        int ni = (i + 1) % segments;
-        verts.push_back((float)baseCenter.x);   verts.push_back((float)baseCenter.y);   verts.push_back((float)baseCenter.z);
-        verts.push_back((float)ring[ni].x);     verts.push_back((float)ring[ni].y);     verts.push_back((float)ring[ni].z);
-        verts.push_back((float)ring[i].x);      verts.push_back((float)ring[i].y);      verts.push_back((float)ring[i].z);
-    }
-
-    return verts;
-}
-
 void TransformTool::drawGizmo(const Vec3d& objPosition, int grabbedAxisIndex, GLuint shaderProgram, const Mat4& view, const Mat4& projection) {
     // Query attribute/uniform locations from the supplied program (doesn't require the program to be bound for glGet*).
     GLint locPos = glGetAttribLocation(shaderProgram, "aPos");
@@ -140,20 +99,39 @@ void TransformTool::drawGizmo(const Vec3d& objPosition, int grabbedAxisIndex, GL
         float coneBaseRadius = arrowSize * 0.5f;
         Vec3d tip = coneBaseCenter + dirNorm * arrowSize;
 
-        std::vector<float> coneVerts = generateConeMesh(coneBaseCenter, tip, coneBaseRadius, segments);
+        std::vector<Vertex> coneVerts;
+        std::vector<unsigned int> coneIndices;
+
+        ShapeGenerator::createCone(coneBaseCenter, tip, coneBaseRadius, segments, coneVerts, coneIndices);
 
         if (!coneVerts.empty()) {
-            GLuint coneVBO = 0, coneVAO = 0;
+            GLuint coneVAO = 0, coneVBO = 0, coneEBO = 0;
             glGenVertexArrays(1, &coneVAO);
             glGenBuffers(1, &coneVBO);
-            glBindVertexArray(coneVAO);
-            glBindBuffer(GL_ARRAY_BUFFER, coneVBO);
-            glBufferData(GL_ARRAY_BUFFER, sizeof(float) * coneVerts.size(), &coneVerts[0], GL_STATIC_DRAW);
+            glGenBuffers(1, &coneEBO);
 
-            // cone vertex buffer only has positions
+            glBindVertexArray(coneVAO);
+
+            glBindBuffer(GL_ARRAY_BUFFER, coneVBO);
+            glBufferData(GL_ARRAY_BUFFER, coneVerts.size() * sizeof(Vertex), &coneVerts[0], GL_STATIC_DRAW);
+
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, coneEBO);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, coneIndices.size() * sizeof(unsigned int), &coneIndices[0], GL_STATIC_DRAW);
+
+            // position
             if (locPos >= 0) {
                 glEnableVertexAttribArray((GLuint)locPos);
-                glVertexAttribPointer((GLuint)locPos, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+                glVertexAttribPointer((GLuint)locPos, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, pos));
+            }
+            // color
+            if (locColor >= 0) {
+                glEnableVertexAttribArray((GLuint)locColor);
+                glVertexAttribPointer((GLuint)locColor, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, color));
+            }
+            // normal
+            if (locNormal >= 0) {
+                glEnableVertexAttribArray((GLuint)locNormal);
+                glVertexAttribPointer((GLuint)locNormal, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, normal));
             }
 
             if (locModel >= 0) glUniformMatrix4fv(locModel, 1, GL_FALSE, model.value_ptr());
@@ -162,11 +140,14 @@ void TransformTool::drawGizmo(const Vec3d& objPosition, int grabbedAxisIndex, GL
             if (locUseOverride >= 0) glUniform1i(locUseOverride, 1);
             if (locOverrideColor >= 0) glUniform3fv(locOverrideColor, 1, &color[0]);
 
-            glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(coneVerts.size() / 3));
+            glDrawElements(GL_TRIANGLES, (GLsizei)coneIndices.size(), GL_UNSIGNED_INT, (void*)0);
 
             if (locPos >= 0) glDisableVertexAttribArray((GLuint)locPos);
+            if (locColor >= 0) glDisableVertexAttribArray((GLuint)locColor);
+            if (locNormal >= 0) glDisableVertexAttribArray((GLuint)locNormal);
             glBindVertexArray(0);
             glDeleteBuffers(1, &coneVBO);
+            glDeleteBuffers(1, &coneEBO);
             glDeleteVertexArrays(1, &coneVAO);
         }
     }

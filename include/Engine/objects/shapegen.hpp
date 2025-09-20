@@ -33,6 +33,7 @@ public:
     static void createPlane(float width, float height, std::vector<Vertex>& outVertices, std::vector<unsigned int>& outIndices);
     static void createPyramid(float size, float height, std::vector<Vertex>& outVertices, std::vector<unsigned int>& outIndices);
     static void createSphere(float radius, int segments, int rings, std::vector<Vertex>& outVertices, std::vector<unsigned int>& outIndices);
+    static void createCone(const Vec3d& baseCenter, const Vec3d& tip, float baseRadius, int segments, std::vector<Vertex>& outVertices, std::vector<unsigned int>& outIndices);
 
     unsigned int loadTexture(const char* path);
 };

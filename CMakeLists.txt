@@ -71,3 +71,7 @@ add_custom_command(TARGET GENGINE_PLAYER POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/textures $<TARGET_FILE_DIR:GENGINE_PLAYER>/textures
     COMMENT "Packaging shaders and textures alongside GENGINE_PLAYER"
 )
+
+add_executable(GENGINE_LAUNCHER Launcher/main.cpp include/glad/glad.c include/tinyfiledialogs/tinyfiledialogs.c ${IMGUI_CORE_SRC} ${IMGUI_BACKENDS})
+target_include_directories(GENGINE_LAUNCHER PRIVATE include source shaders include/nsmlib include/imgui include/tinyfiledialogs/)
+target_link_libraries(GENGINE_LAUNCHER PRIVATE SDL2::SDL2 OpenGL::GL)

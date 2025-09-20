@@ -4,35 +4,90 @@
 #include "Engine/util/shaderc.hpp"
 #include <sys/stat.h>
 
+#include "stb_image.h"
+
+// Helper function to get the position of a physics body.
+static Vec3d getBodyPos(const Physics::RigidBody* b) {
+	if (!b) return Vec3d(0.0f, 0.0f, 0.0f);
+	// If the body has an associated owner object, read the owner's authoritative position.
+	if (b->owner) return b->owner->position;
+	// otherwise use the internal body position
+	return b->position;
+}
+#include <SDL2/SDL.h>
+
 extern int glShaderType;
 static GLuint s_unlitProgram = 0;
 static Shaderc s_shaderCompiler;
 static time_t s_unlitVertMtime = 0;
 static time_t s_unlitFragMtime = 0;
 
+// Added wireframe program + mtimes
+static GLuint s_wireProgram = 0;
+static time_t s_wireVertMtime = 0;
+static time_t s_wireFragMtime = 0;
+
+static GLuint s_skyboxShader = 0;
+static time_t s_skyboxVertMtime = 0;
+static time_t s_skyboxFragMtime = 0;
+
 SceneManager::SceneManager()
 		: selectedObject(NULL),
-			axisGrabbed(false),
-			grabbedAxisIndex(-1),
-			objectDrag(false),
-			dragPlaneNormal(Vec3d(0.0f)),
-			dragInitialPoint(Vec3d(0.0f)),
-			dragInitialObjPos(Vec3d(0.0f)),
-			axisGrabDistance(0.12f),
-			gizmoLineWidth(10.0f),
-			axisVAO(0), axisVBO(0),
-			lightVAO(0), lightVBO(0),
-			selectedLightIndex(-1),
-			objCounter(0),
-			gridVAO(0), gridVBO(0), gridVertexCount(0)
+		axisGrabbed(false),
+		grabbedAxisIndex(-1),
+		objectDrag(false),
+		dragPlaneNormal(Vec3d(0.0f)),
+		dragInitialPoint(Vec3d(0.0f)),
+		dragInitialObjPos(Vec3d(0.0f)),
+		axisGrabDistance(0.12f),
+		gizmoLineWidth(10.0f),
+		axisVAO(0), axisVBO(0),
+		lightVAO(0), lightVBO(0),
+		selectedLightIndex(-1),
+		objCounter(0),
+		gridVAO(0), gridVBO(0), gridVertexCount(0),
+		physics(),
+		skyboxMode(SkyboxMode::None),
+		skyboxColor(Vec3d(0.53f, 0.81f, 0.92f)),
+		skyboxCubemapID(0),
+		skyboxCubemapPaths(),
+		skyboxVAO(0),
+		skyboxVBO(0)
 {
-
+	// Try relative path first (as before)
 	shadowDepthProgram = s_shaderCompiler.loadShader("shaders/shadows/shadow_depth_vert.glsl", "shaders/shadows/shadow_depth_frag.glsl");
-	if (shadowDepthProgram == 0) {
-		std::cerr << "[SceneManager] Failed to load shadow depth shader!" << std::endl;
-	} else {
+	if (shadowDepthProgram != 0) {
 		std::cerr << "[SceneManager] shadowDepthProgram id = " << shadowDepthProgram << std::endl;
+	} else {
+		// Fallback: try loading from exe base path (useful when working directory differs)
+		char* base = SDL_GetBasePath();
+		if (base) {
+			std::string basePath(base);
+			std::string v = basePath + "shaders/shadows/shadow_depth_vert.glsl";
+			std::string f = basePath + "shaders/shadows/shadow_depth_frag.glsl";
+			std::cerr << "[SceneManager] relative load failed; trying base path: " << basePath << std::endl;
+			shadowDepthProgram = s_shaderCompiler.loadShader(v.c_str(), f.c_str());
+			if (shadowDepthProgram != 0) {
+				std::cerr << "[SceneManager] shadowDepthProgram loaded from base path id = " << shadowDepthProgram << std::endl;
+			} else {
+				std::cerr << "[SceneManager] Failed to load shadow depth shader from base path: " << basePath << std::endl;
+			}
+			SDL_free(base);
+		} else {
+			std::cerr << "[SceneManager] Failed to load shadow depth shader and SDL_GetBasePath() returned NULL" << std::endl;
+		}
+
+		if (shadowDepthProgram == 0) {
+			std::cerr << "[SceneManager] Failed to load shadow depth shader!" << std::endl;
+		}
 	}
+
+	Object* world = new Object();
+	world->type = "World";
+	world->name = "World";
+	world->scale = Vec3d(0, 0, 0);
+	world->position = Vec3d(0, -50, 0);
+	objects.push_back(world);
 }
 
 static bool readFileToString(const std::string& path, std::string& out) {
@@ -47,17 +102,24 @@ static bool readFileToString(const std::string& path, std::string& out) {
 void SceneManager::clearScene() {
 	for (size_t i = 0; i < objects.size(); i++) {
 		delete objects[i];
+		objects[i] = nullptr;
 	}
+	objects.clear();
 
 	for (size_t i = 0; i < lightShadows.size(); i++) {
 		delete lightShadows[i];
 	}
-	
 	lightShadows.clear();
-	objects.clear();
+
 	selectedObject = nullptr;
 	grabbedAxisIndex = -1;
-	// Also clear lights when resetting the scene so loadScene replaces them
+	grabbedAxis = GizmoAxis();
+	axisGrabbed = false;
+	objectDrag = false;
+	dragPlaneNormal = Vec3d(0.0f);
+	dragInitialPoint = Vec3d(0.0f);
+	dragInitialObjPos = Vec3d(0.0f);
+
 	lights.clear();
 	selectedLightIndex = -1;
 }
@@ -68,7 +130,12 @@ static void initMeshForType(Object* obj, const std::string& type) {
 	else if (type == "Sphere")  obj->initSphere(0.5f, 16, 16);
 	else if (type == "Plane")   obj->initPlane(5.0f, 5.0f);
 	else if (type == "Pyramid") obj->initPyramid(1.0f, 1.0f);
+	else if (type == "Player") {
+		obj->initCylinder(0.5f, 2.f, 16);
+	}
 	else                        obj->initCube(1.0f);
+
+	obj->type = type;
 }
 
 Vec3d closestPointOnLine(const Vec3d& rayOrigin, const Vec3d& rayDir,
@@ -299,8 +366,13 @@ bool SceneManager::pickGizmoAxis(const Vec3d& rayOrigin, const Vec3d& rayDir, Gi
 		}
 	}
 
-	if (hit) grabbedAxisIndex = hitIndex;
-	else grabbedAxisIndex = -1;
+	if (hit) {
+		grabbedAxisIndex = hitIndex;
+		// store picked axis into member so dragSelectedObject can use it safely
+		grabbedAxis = outAxis;
+	} else {
+		grabbedAxisIndex = -1;
+	}
 
 	return hit;
 }
@@ -339,18 +411,68 @@ Object* SceneManager::addObject(const std::string& type, const std::string& name
 	initMeshForType(obj, type);
 	obj->name = name;
 	objects.push_back(obj);
+
+	// attach physics body using bounding radius * average scale
+	double r = obj->boundingRadius();
+	Vec3d worldPos = obj->getModelMatrix().transformPoint(Vec3d(0.0f, 0.0f, 0.0f));
+
+	// Special-case Plane: use a thin, static cylinder collider matching plane scale
+	if (type == "Plane") {
+		Physics::RigidBody* rb = physics.createBody(obj, true, 0.0, 0.0, obj->position, Physics::COLLIDER_PLANE, 0.0);
+		if (rb) {
+			rb->isStatic = true;
+			rb->planeY = obj->position.y;
+			rb->enabled = obj->collisionEnabled;
+			rb->isStatic = obj->isStatic;
+		}
+		obj->physicsBody = rb;
+	} else {
+		Physics::RigidBody* rb = physics.createBody(obj, false, 1.0, r, obj->position, Physics::COLLIDER_SPHERE, 1.0);
+		obj->physicsBody = rb;
+	}
+
 	return obj;
 }
 
-void SceneManager::removeObject(Object* objPtr) {
-	for (std::vector<Object*>::iterator it = objects.begin(); it != objects.end(); ) {
-		if ((*it) == objPtr) {
-			it = objects.erase(it);
-		} else {
-			++it;
-		}
+// Helper to detect ancestor relationship (used to prevent cycles when parenting)
+static bool isAncestor(Object* node, Object* possibleAncestor) {
+	if (!node || !possibleAncestor) return false;
+	Object* p = node->parent;
+	while (p) {
+		if (p == possibleAncestor) return true;
+		p = p->parent;
 	}
+	return false;
+}
 
+void SceneManager::setParent(Object* child, Object* parent) {
+	if (!child || child == parent) return;
+	// Prevent cycles
+	if (parent && child->isAncestorOf(parent)) {
+		std::cerr << "[SceneManager] setParent: would create cycle, rejecting\n";
+		return;
+	}
+	child->setParent(parent);
+}
+
+void SceneManager::removeObject(Object* objPtr) {
+	if (!objPtr) return;
+
+	// Detach from parent if present
+	objPtr->detachFromParent();
+
+	// Optionally recursively delete all children
+	objPtr->removeAllChildren(true);
+
+	// remove physics body (if any)
+	physics.removeBody(objPtr);
+ objPtr->physicsBody = nullptr;
+
+	// remove from scene->objects
+	auto it = std::find(objects.begin(), objects.end(), objPtr);
+	if (it != objects.end()) objects.erase(it);
+
+	// finally free object
 	delete objPtr;
 }
 
@@ -380,11 +502,249 @@ void SceneManager::addLight(const Light& light){
 	lightShadows.push_back(sh);
 }
 
-void SceneManager::update(float deltaTime) {}
+void SceneManager::update(float deltaTime) {
+	// step physics (clamp dt to a stable range)
+	const float maxStep = 1.0f / 30.0f;
+	float dt = std::min(deltaTime, maxStep);
+	physics.step(dt);
+}
+
+GLuint SceneManager::loadTextureFromFile(const std::string& path) {
+	if (path.empty()) return 0;
+	int w = 0, h = 0, nrChannels = 0;
+	stbi_uc* data = stbi_load(path.c_str(), &w, &h, &nrChannels, 0);
+	if (!data) {
+		std::cerr << "[SceneManager] Failed to load image: " << path << " (stbi)\n";
+		return 0;
+	}
+
+	GLenum format = GL_RGB;
+	if (nrChannels == 4) format = GL_RGBA;
+	else if (nrChannels == 3) format = GL_RGB;
+	else if (nrChannels == 1) format = GL_RED;
+
+	GLuint tex = 0;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+	glTexImage2D(GL_TEXTURE_2D, 0, format, w, h, 0, format, GL_UNSIGNED_BYTE, data);
+	glGenerateMipmap(GL_TEXTURE_2D);
+
+	glBindTexture(GL_TEXTURE_2D, 0);
+	stbi_image_free(data);
+	std::cerr << "[SceneManager] Loaded skybox texture '" << path << "' -> id=" << tex << " (" << w << "x" << h << ", ch=" << nrChannels << ")\n";
+	return tex;
+}
+
+GLuint SceneManager::loadCubemap(const std::vector<std::string>& faces) {
+    GLuint texID;
+    glGenTextures(1, &texID);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, texID);
+
+    int width, height, nrChannels;
+    for (GLuint i = 0; i < faces.size(); i++) {
+        unsigned char* data = stbi_load(faces[i].c_str(), &width, &height, &nrChannels, 0);
+        if (data) {
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+            stbi_image_free(data);
+        } else {
+            // handle error
+        }
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+    return texID;
+}
+
+void SceneManager::setSkyboxColor(const Vec3d& color) {
+	skyboxColor = color;
+	skyboxMode = SkyboxMode::Color;
+	// Clean up cubemap if switching to color
+	if (skyboxCubemapID != 0) {
+		glDeleteTextures(1, &skyboxCubemapID);
+		skyboxCubemapID = 0;
+		skyboxCubemapPaths.clear();
+	}
+}
+
+bool SceneManager::setSkyboxCubemap(const std::vector<std::string>& faces) {
+	if (faces.size() != 6) {
+		std::cerr << "[SceneManager] setSkyboxCubemap: 6 faces required\n";
+		return false;
+	}
+	for (const auto& f : faces) {
+		if (!std::ifstream(f).good()) {
+			std::cerr << "[SceneManager] Cubemap face not found: " << f << std::endl;
+			return false;
+		}
+	}
+	GLuint newTex = loadCubemap(faces);
+	if (newTex == 0) return false;
+
+	if (skyboxCubemapID != 0) glDeleteTextures(1, &skyboxCubemapID);
+
+	skyboxCubemapID = newTex;
+	skyboxCubemapPaths = faces;
+	skyboxMode = SkyboxMode::Cubemap;
+	return true;
+}
+
+bool SceneManager::setSkyboxCubemapFrom3x2(const std::string& path) {
+	if (skyboxCubemapID != 0) {
+		glDeleteTextures(1, &skyboxCubemapID);
+		skyboxCubemapID = 0;
+	}
+
+	int width, height, channels;
+	unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 0);
+	if (!data) {
+		std::cerr << "[SceneManager] stbi_load failed for: " << path << std::endl;
+		return false;
+	}
+
+	// Minimum size check
+	if (width < 3 || height < 2) {
+		std::cerr << "[SceneManager] Image too small for 3x2 cubemap: " << path << std::endl;
+		stbi_image_free(data);
+		return false;
+	}
+
+	int cellW = width / 3;
+	int cellH = height / 2;
+
+	int faceOffsets[6][2] = {
+		{0,0}, // +X (right)
+		{1,0}, // -X (left)
+		{2,0}, // +Y (top)
+		{0,1}, // -Y (bottom)
+		{1,1}, // +Z (front)
+		{2,1}  // -Z (back)
+	};
+
+	GLuint texID;
+	glGenTextures(1, &texID);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, texID);
+
+	for (int face = 0; face < 6; ++face) {
+		int ox = faceOffsets[face][0] * cellW;
+		int oy = faceOffsets[face][1] * cellH;
+
+		// Allocate a square buffer for the face (using the smaller of cellW/cellH)
+		int faceSize = std::min(cellW, cellH);
+		std::vector<unsigned char> faceData(faceSize * faceSize * channels, 0);
+
+		for (int y = 0; y < faceSize; ++y) {
+			int srcY = oy + y * cellH / faceSize;
+			for (int x = 0; x < faceSize; ++x) {
+				int srcX = ox + x * cellW / faceSize;
+				for (int c = 0; c < channels; ++c) {
+					faceData[(y * faceSize + x) * channels + c] =
+						data[((srcY * width) + srcX) * channels + c];
+				}
+			}
+		}
+
+		glTexImage2D(
+			GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0,
+			channels == 4 ? GL_RGBA : GL_RGB,
+			faceSize, faceSize, 0,
+			channels == 4 ? GL_RGBA : GL_RGB,
+			GL_UNSIGNED_BYTE, faceData.data()
+		);
+	}
+
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+	stbi_image_free(data);
+
+	this->skyboxCubemapID = texID;
+	this->skyboxMode = SkyboxMode::Cubemap;
+	this->skyboxCubemapPaths.clear();
+	this->skyboxCubemapPaths.push_back(path); // for info
+
+	return true;
+}
+
+bool SceneManager::setSkyboxEquirectangular(const std::string& path) {
+	GLuint tex = loadTextureFromFile(path);
+	if (tex == 0) return false;
+
+	if (skyboxEquirectID != 0) glDeleteTextures(1, &skyboxEquirectID);
+	skyboxEquirectID = tex;
+	skyboxMode = SkyboxMode::Equirectangular;
+
+	if (skyboxCubemapID != 0) {
+		glDeleteTextures(1, &skyboxCubemapID);
+		skyboxCubemapID = 0;
+		skyboxCubemapPaths.clear();
+	}
+	return true;
+}
+
+void SceneManager::clearSkybox() {
+	if (skyboxCubemapID != 0) {
+		glDeleteTextures(1, &skyboxCubemapID);
+		skyboxCubemapID = 0;
+	}
+	skyboxCubemapPaths.clear();
+	skyboxMode = SkyboxMode::None;
+}
+
+void SceneManager::setSkyboxMode(SkyboxMode mode) {
+	skyboxMode = mode;
+}
+
+GLuint getSkyboxShader() {
+    const char* vertPath = "shaders/skybox/vertex.glsl";
+    const char* fragPath = "shaders/skybox/fragment.glsl";
+
+    auto getMTime = [](const char* path)->time_t {
+        struct stat st;
+        if (stat(path, &st) == 0) return st.st_mtime;
+        return 0;
+    };
+
+    time_t vm = getMTime(vertPath);
+    time_t fm = getMTime(fragPath);
+
+    if (s_skyboxShader == 0 || vm != s_skyboxVertMtime || fm != s_skyboxFragMtime) {
+        if (s_skyboxShader != 0) {
+            glDeleteProgram(s_skyboxShader);
+            s_skyboxShader = 0;
+        }
+        GLuint prog = s_shaderCompiler.loadShader(vertPath, fragPath);
+        if (prog != 0) {
+            s_skyboxShader = prog;
+            s_skyboxVertMtime = vm;
+            s_skyboxFragMtime = fm;
+            std::cerr << "[SceneManager] Loaded skybox shader id=" << prog << std::endl;
+        } else {
+            std::cerr << "[SceneManager] Failed to load skybox shader!" << std::endl;
+        }
+    }
+    return s_skyboxShader;
+}
 
 void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& projection) {
 	const char* unlitVertPath = "shaders/unlit/vertex.glsl";
 	const char* unlitFragPath = "shaders/unlit/fragment.glsl";
+
+	// wireframe shader paths
+	const char* wireVertPath = "shaders/wireframe/vertex.glsl";
+	const char* wireFragPath = "shaders/wireframe/fragment.glsl";
 
 	auto getMTime = [](const char* path)->time_t {
 		struct stat st;
@@ -392,6 +752,7 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 		return 0;
 	};
 
+	// hot-reload unlit shader when requested
 	if (glShaderType == 1) {
 		time_t vm = getMTime(unlitVertPath);
 		time_t fm = getMTime(unlitFragPath);
@@ -413,22 +774,235 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 		}
 	}
 
+	// hot-reload wireframe shader when requested
+	if (glShaderType == 2) {
+		time_t vm = getMTime(wireVertPath);
+		time_t fm = getMTime(wireFragPath);
+		if (s_wireProgram == 0 || vm != s_wireVertMtime || fm != s_wireFragMtime) {
+			if (s_wireProgram != 0) {
+				glDeleteProgram(s_wireProgram);
+				s_wireProgram = 0;
+			}
+			GLuint prog = s_shaderCompiler.loadShader(wireVertPath, wireFragPath);
+			if (prog != 0) {
+				s_wireProgram = prog;
+				s_wireVertMtime = vm;
+				s_wireFragMtime = fm;
+				std::cerr << "[SceneManager] Loaded wireframe shader id=" << prog << std::endl;
+			}
+			else {
+				std::cerr << "[SceneManager] Failed to load wireframe shader, falling back to lit." << std::endl;
+			}
+		}
+	}
+
 	// Detect depth-only pass (renderDepth calls scene->render with depthProgram)
 	bool depthPass = (shaderProgram == shadowDepthProgram);
 
-	GLuint activeProgram = (glShaderType == 1 && s_unlitProgram != 0 && !depthPass) ? s_unlitProgram : shaderProgram;
+	// choose active program: prefer unlit/wire when requested and available (but never during depth pass)
+	GLuint activeProgram = shaderProgram;
+	if (!depthPass) {
+		if (glShaderType == 1 && s_unlitProgram != 0) activeProgram = s_unlitProgram;
+		else if (glShaderType == 2 && s_wireProgram != 0) activeProgram = s_wireProgram;
+	}
+
+	// Save currently bound program so we can restore it where needed
+	GLint prevProg = 0;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
+
+	// Expose active program to editor (so gizmos/grid use the same)
+	lastActiveProgram = shaderProgram;
+
+	glUseProgram(shaderProgram);
+
+	if (skyboxMode == SkyboxMode::Color) {
+		glClearColor(skyboxColor.x, skyboxColor.y, skyboxColor.z, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+	} else if (skyboxMode == SkyboxMode::Cubemap && skyboxCubemapID != 0) {
+		// Draw skybox cube with cubemap
+		static float skyboxVertices[] = {
+			// positions
+			-1.0f,  1.0f, -1.0f,
+			-1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+			 1.0f,  1.0f, -1.0f,
+			-1.0f,  1.0f, -1.0f,
+
+			-1.0f, -1.0f,  1.0f,
+			-1.0f, -1.0f, -1.0f,
+			-1.0f,  1.0f, -1.0f,
+			-1.0f,  1.0f, -1.0f,
+			-1.0f,  1.0f,  1.0f,
+			-1.0f, -1.0f,  1.0f,
+
+			 1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+
+			-1.0f, -1.0f,  1.0f,
+			-1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f, -1.0f,  1.0f,
+			-1.0f, -1.0f,  1.0f,
+
+			-1.0f,  1.0f, -1.0f,
+			 1.0f,  1.0f, -1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			-1.0f,  1.0f,  1.0f,
+			-1.0f,  1.0f, -1.0f,
+
+			-1.0f, -1.0f, -1.0f,
+			-1.0f, -1.0f,  1.0f,
+			 1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+			-1.0f, -1.0f,  1.0f,
+			 1.0f, -1.0f,  1.0f
+		};
+		if (skyboxVAO == 0) {
+			glGenVertexArrays(1, &skyboxVAO);
+			glGenBuffers(1, &skyboxVBO);
+			glBindVertexArray(skyboxVAO);
+			glBindBuffer(GL_ARRAY_BUFFER, skyboxVBO);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(skyboxVertices), &skyboxVertices, GL_STATIC_DRAW);
+			glEnableVertexAttribArray(0);
+			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+			glBindVertexArray(0);
+		}
+
+		GLuint skyboxShader = getSkyboxShader();
+		glUseProgram(skyboxShader);
+
+		Mat4 viewNoTrans = view;
+		viewNoTrans.m[3][0] = 0.0f;
+		viewNoTrans.m[3][1] = 0.0f;
+		viewNoTrans.m[3][2] = 0.0f;
+
+		glUniformMatrix4fv(glGetUniformLocation(skyboxShader, "view"), 1, GL_FALSE, viewNoTrans.value_ptr());
+		glUniformMatrix4fv(glGetUniformLocation(skyboxShader, "projection"), 1, GL_FALSE, projection.value_ptr());
+
+		glDepthFunc(GL_LEQUAL);
+		glBindVertexArray(skyboxVAO);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_CUBE_MAP, skyboxCubemapID);
+		glUniform1i(glGetUniformLocation(skyboxShader, "skybox"), 0);
+		glDrawArrays(GL_TRIANGLES, 0, 36);
+		glBindVertexArray(0);
+		glDepthFunc(GL_LESS);
+
+		glUseProgram(prevProg);
+	} else if (skyboxMode == SkyboxMode::Equirectangular && skyboxEquirectID != 0) {
+		static float skyboxVertices[] = {
+			-1.0f,  1.0f, -1.0f,
+			-1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+			 1.0f,  1.0f, -1.0f,
+			-1.0f,  1.0f, -1.0f,
+
+			-1.0f, -1.0f,  1.0f,
+			-1.0f, -1.0f, -1.0f,
+			-1.0f,  1.0f, -1.0f,
+			-1.0f,  1.0f, -1.0f,
+			-1.0f,  1.0f,  1.0f,
+			-1.0f, -1.0f,  1.0f,
+
+			 1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+
+			-1.0f, -1.0f,  1.0f,
+			-1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f, -1.0f,  1.0f,
+			-1.0f, -1.0f,  1.0f,
+
+			-1.0f,  1.0f, -1.0f,
+			 1.0f,  1.0f, -1.0f,
+			 1.0f,  1.0f,  1.0f,
+			 1.0f,  1.0f,  1.0f,
+			-1.0f,  1.0f,  1.0f,
+			-1.0f,  1.0f, -1.0f,
+
+			-1.0f, -1.0f, -1.0f,
+			-1.0f, -1.0f,  1.0f,
+			 1.0f, -1.0f, -1.0f,
+			 1.0f, -1.0f, -1.0f,
+			-1.0f, -1.0f,  1.0f,
+			 1.0f, -1.0f,  1.0f
+		};
+		if (skyboxVAO == 0) {
+			glGenVertexArrays(1, &skyboxVAO);
+			glGenBuffers(1, &skyboxVBO);
+			glBindVertexArray(skyboxVAO);
+			glBindBuffer(GL_ARRAY_BUFFER, skyboxVBO);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(skyboxVertices), &skyboxVertices, GL_STATIC_DRAW);
+			glEnableVertexAttribArray(0);
+			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+			glBindVertexArray(0);
+		}
+
+		// Load equirectangular skybox shader
+		static GLuint equirectShader = 0;
+		static time_t vertMtime = 0, fragMtime = 0;
+		const char* vertPath = "shaders/skybox/vertex.glsl";
+		const char* fragPath = "shaders/skybox/equirect_frag.glsl";
+		auto getMTime = [](const char* path)->time_t {
+			struct stat st;
+			if (stat(path, &st) == 0) return st.st_mtime;
+			return 0;
+			};
+		time_t vm = getMTime(vertPath);
+		time_t fm = getMTime(fragPath);
+		if (equirectShader == 0 || vm != vertMtime || fm != fragMtime) {
+			if (equirectShader != 0) glDeleteProgram(equirectShader);
+			equirectShader = s_shaderCompiler.loadShader(vertPath, fragPath);
+			vertMtime = vm;
+			fragMtime = fm;
+		}
+		glUseProgram(equirectShader);
+
+		Mat4 viewNoTrans = view;
+		viewNoTrans.m[0][3] = 0.0f;
+		viewNoTrans.m[1][3] = 0.0f;
+		viewNoTrans.m[2][3] = 0.0f;
+
+		glUniformMatrix4fv(glGetUniformLocation(equirectShader, "view"), 1, GL_FALSE, viewNoTrans.value_ptr());
+		glUniformMatrix4fv(glGetUniformLocation(equirectShader, "projection"), 1, GL_FALSE, projection.value_ptr());
+
+		glDepthFunc(GL_LEQUAL);
+		glBindVertexArray(skyboxVAO);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, skyboxEquirectID);
+		glUniform1i(glGetUniformLocation(equirectShader, "equirectMap"), 0);
+		glDrawArrays(GL_TRIANGLES, 0, 36);
+		glBindVertexArray(0);
+		glDepthFunc(GL_LESS);
+
+		glUseProgram(prevProg);
+	}
+	
+	if (!depthPass) {
+		if (glShaderType == 1 && s_unlitProgram != 0) activeProgram = s_unlitProgram;
+		else if (glShaderType == 2 && s_wireProgram != 0) activeProgram = s_wireProgram;
+	}
+
 	glUseProgram(activeProgram);
 
-	// store for external users (grid/gizmo drawing callers)
-	this->lastActiveProgram = activeProgram;
-
-	// --- Ensure axis VAO/VBO exist (used for transform gizmo helper drawing in render)
 	if (axisVAO == 0) {
 		// create a simple three-axis line buffer (0->X, 0->Y, 0->Z)
 		Vec3d axisVerts[6] = {
 			Vec3d(0.0f,0.0f,0.0f), Vec3d(1.0f,0.0f,0.0f), // X
 			Vec3d(0.0f,0.0f,0.0f), Vec3d(0.0f,1.0f,0.0f), // Y
-			// will draw Z as two verts in second draw call (we store both pairs)
 		};
 		// expand to 6 verts (X,Y,Z)
 		Vec3d allVerts[6] = {
@@ -515,15 +1089,18 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 			std::string locDirs = std::string("dirLightDirs[") + idx + "]";
 			std::string locColors = std::string("dirLightColors[") + idx + "]";
 			std::string locInts = std::string("dirLightIntensities[") + idx + "]";
+
 			glUniform3fv(glGetUniformLocation(activeProgram, locDirs.c_str()), 1, &l.direction[0]);
 			glUniform3fv(glGetUniformLocation(activeProgram, locColors.c_str()), 1, &l.color[0]);
 			glUniform1f(glGetUniformLocation(activeProgram, locInts.c_str()), l.intensity);
 			dirCount++;
-		} else if (l.type == LightType::Point) {
+		}
+		else if (l.type == LightType::Point) {
 			std::ostringstream ss; ss << pointCount; std::string idx = ss.str();
 			std::string locPos = std::string("pointLightPositions[") + idx + "]";
 			std::string locCol = std::string("pointLightColors[") + idx + "]";
 			std::string locInt = std::string("pointLightIntensities[") + idx + "]";
+
 			glUniform3fv(glGetUniformLocation(activeProgram, locPos.c_str()), 1, &l.position[0]);
 			glUniform3fv(glGetUniformLocation(activeProgram, locCol.c_str()), 1, &l.color[0]);
 			glUniform1f(glGetUniformLocation(activeProgram, locInt.c_str()), l.intensity);
@@ -535,16 +1112,19 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 	glUniform1i(glGetUniformLocation(activeProgram, "uNumPointLights"), pointCount);
 
 	unsigned int modelLoc = glGetUniformLocation(activeProgram, "model");
-	unsigned int viewLoc  = glGetUniformLocation(activeProgram, "view");
-	unsigned int projLoc  = glGetUniformLocation(activeProgram, "projection");
+	unsigned int viewLoc = glGetUniformLocation(activeProgram, "view");
+	unsigned int projLoc = glGetUniformLocation(activeProgram, "projection");
 	glUniformMatrix4fv(viewLoc, 1, GL_FALSE, view.value_ptr());
 	glUniformMatrix4fv(projLoc, 1, GL_FALSE, projection.value_ptr());
 
 	// Draw scene objects (both regular and depth passes)
 	for (size_t oi = 0; oi < objects.size(); ++oi) {
 		Object* obj = objects[oi];
+		if (!obj) continue; // guard against nullptr entries
 		Mat4 model = obj->getModelMatrix();
 		glUniformMatrix4fv(modelLoc, 1, GL_FALSE, model.value_ptr());
+
+		if (obj->type == "Player" && !drawPlayerModel) continue;
 
 		if (!depthPass) {
 			if (obj->textureID != 0) {
@@ -552,7 +1132,8 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 				glBindTexture(GL_TEXTURE_2D, obj->textureID);
 				glUniform1i(glGetUniformLocation(activeProgram, "uTexture"), 0);
 				glUniform1i(glGetUniformLocation(activeProgram, "useTexture"), 1);
-			} else {
+			}
+			else {
 				glUniform1i(glGetUniformLocation(activeProgram, "useTexture"), 0);
 			}
 
@@ -560,15 +1141,198 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 			glUniform1i(glGetUniformLocation(activeProgram, "useOverrideColor"), 0);
 		}
 
+		// Ensure object has mesh data and GL resources before drawing
+		if (obj->vertices.empty() || obj->indices.empty()) {
+			//std::cerr << "[SceneManager] Skipping object " << oi << " - empty mesh data\n";
+			continue;
+		}
+
+		// If VAO wasn't created (eg. object deserialized before GL resources were available)
+		// create GL resources now by calling setupMesh().
+		if (obj->VAO == 0) {
+			std::cerr << "[SceneManager] Lazy-initializing GL resources for object " << oi << "\n";
+			obj->setupMesh();
+			if (obj->VAO == 0) {
+				std::cerr << "[SceneManager] ERROR: setupMesh failed to create VAO for object " << oi << "\n";
+				continue;
+			}
+		}
+
 		glBindVertexArray(obj->VAO);
+
+		// If wireframe mode requested, draw mesh as lines (only for object geometry)
+		bool drewWireframe = false;
+		if (!depthPass && glShaderType == 2) {
+			// set polygon mode to line for object draw then restore
+			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+			// optionally set line width based on gizmoLineWidth or a constant
+			glLineWidth(1.0f);
+			drewWireframe = true;
+		}
+
 		glDrawElements(GL_TRIANGLES, (GLsizei)obj->indices.size(), GL_UNSIGNED_INT, 0);
+
+		if (drewWireframe) {
+			// restore fill mode
+			glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+		}
+
 		glBindVertexArray(0);
 	}
 
 	// If we were called as a depth pass, return now — do not draw gizmos, grid, or light gizmos into shadow maps.
-
 	if (depthPass) return;
 
+	// Debug: wireframe collider rendering
+	if (this->drawColliders) {
+		// ensure override color is used
+		GLint locUse = glGetUniformLocation(activeProgram, "useOverrideColor");
+		GLint locColor = glGetUniformLocation(activeProgram, "overrideColor");
+		if (locUse >= 0) glUniform1i(locUse, 1);
+		if (locColor >= 0) glUniform3f(locColor, 1.0f, 0.0f, 0.0f); // red
+
+		// helper to draw a ring (XZ plane) at given center and radius
+		auto drawRing = [&](const Vec3d& center, double radius, int segments = 28) {
+			if (radius <= 0.0) return;
+			std::vector<float> verts;
+			verts.reserve((size_t)segments * 3);
+			for (int i = 0; i < segments; ++i) {
+				double a = (double)i / (double)segments * (2.0 * M_PI);
+				float x = (float)(center.x + radius * std::cos(a));
+				float z = (float)(center.z + radius * std::sin(a));
+				float y = (float)center.y;
+				verts.push_back(x); verts.push_back(y); verts.push_back(z);
+			}
+			GLuint vao = 0, vbo = 0;
+			glGenVertexArrays(1, &vao);
+			glGenBuffers(1, &vbo);
+			glBindVertexArray(vao);
+			glBindBuffer(GL_ARRAY_BUFFER, vbo);
+			glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+			glEnableVertexAttribArray(0);
+			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+			// model = identity (we provided world coords)
+			Mat4 model = Mat4(1.0f);
+			glUniformMatrix4fv(glGetUniformLocation(activeProgram, "model"), 1, GL_FALSE, model.value_ptr());
+			glDrawArrays(GL_LINE_LOOP, 0, segments);
+			glDisableVertexAttribArray(0);
+			glBindVertexArray(0);
+			glDeleteBuffers(1, &vbo);
+			glDeleteVertexArrays(1, &vao);
+			};
+
+		// helper to draw cylinder wireframe (top/bottom rings + vertical lines)
+		auto drawCylinder = [&](const Vec3d& center, double radius, double height, int segments = 20) {
+			double half = height * 0.5;
+			Vec3d top(center.x, center.y + half, center.z);
+			Vec3d bottom(center.x, center.y - half, center.z);
+			// top and bottom rings
+			drawRing(top, radius, segments);
+			drawRing(bottom, radius, segments);
+
+			// vertical lines at a few sample angles
+			for (int i = 0; i < segments; i += std::max(1, segments / 8)) {
+				double a = (double)i / (double)segments * (2.0 * M_PI);
+				float tx = (float)(center.x + radius * std::cos(a));
+				float tz = (float)(center.z + radius * std::sin(a));
+				float tyTop = (float)top.y;
+				float tyBottom = (float)bottom.y;
+				float lineVerts[6] = { tx, tyBottom, tz, tx, tyTop, tz };
+				GLuint vao = 0, vbo = 0;
+				glGenVertexArrays(1, &vao);
+				glGenBuffers(1, &vbo);
+				glBindVertexArray(vao);
+				glBindBuffer(GL_ARRAY_BUFFER, vbo);
+				glBufferData(GL_ARRAY_BUFFER, sizeof(lineVerts), lineVerts, GL_STATIC_DRAW);
+				glEnableVertexAttribArray(0);
+				glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+				Mat4 model = Mat4(1.0f);
+				glUniformMatrix4fv(glGetUniformLocation(activeProgram, "model"), 1, GL_FALSE, model.value_ptr());
+				glDrawArrays(GL_LINES, 0, 2);
+				glDisableVertexAttribArray(0);
+				glBindVertexArray(0);
+				glDeleteBuffers(1, &vbo);
+				glDeleteVertexArrays(1, &vao);
+			}
+			};
+
+		// helper to draw simple sphere wireframe using 3 rings (XZ, XY, YZ)
+		auto drawSphere = [&](const Vec3d& center, double radius, int segments = 24) {
+			// XZ ring at center.y
+			drawRing(center, radius, segments);
+			// XY ring (y changes) - draw as points, transform accordingly
+			{
+				std::vector<float> verts;
+				verts.reserve(segments * 3);
+				for (int i = 0; i < segments; ++i) {
+					double a = (double)i / (double)segments * (2.0 * M_PI);
+					float x = (float)(center.x + radius * std::cos(a));
+					float y = (float)(center.y + radius * std::sin(a));
+					float z = (float)center.z;
+					verts.push_back(x); verts.push_back(y); verts.push_back(z);
+				}
+				GLuint vao = 0, vbo = 0;
+				glGenVertexArrays(1, &vao);
+				glGenBuffers(1, &vbo);
+				glBindVertexArray(vao);
+				glBindBuffer(GL_ARRAY_BUFFER, vbo);
+				glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+				glEnableVertexAttribArray(0);
+				glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+				Mat4 model = Mat4(1.0f);
+				glUniformMatrix4fv(glGetUniformLocation(activeProgram, "model"), 1, GL_FALSE, model.value_ptr());
+				glDrawArrays(GL_LINE_LOOP, 0, segments);
+				glDisableVertexAttribArray(0);
+				glBindVertexArray(0);
+				glDeleteBuffers(1, &vbo);
+				glDeleteVertexArrays(1, &vao);
+			}
+			// YZ ring
+			{
+				std::vector<float> verts;
+				verts.reserve(static_cast<std::vector<float, std::allocator<float>>::size_type>(segments) * 3);
+				for (int i = 0; i < segments; ++i) {
+					double a = (double)i / (double)segments * (2.0 * M_PI);
+					float z = (float)(center.z + radius * std::cos(a));
+					float y = (float)(center.y + radius * std::sin(a));
+					float x = (float)center.x;
+					verts.push_back(x); verts.push_back(y); verts.push_back(z);
+				}
+				GLuint vao = 0, vbo = 0;
+				glGenVertexArrays(1, &vao);
+				glGenBuffers(1, &vbo);
+				glBindVertexArray(vao);
+				glBindBuffer(GL_ARRAY_BUFFER, vbo);
+				glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+				glEnableVertexAttribArray(0);
+				glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+				Mat4 model = Mat4(1.0f);
+				glUniformMatrix4fv(glGetUniformLocation(activeProgram, "model"), 1, GL_FALSE, model.value_ptr());
+				glDrawArrays(GL_LINE_LOOP, 0, segments);
+				glDisableVertexAttribArray(0);
+				glBindVertexArray(0);
+				glDeleteBuffers(1, &vbo);
+				glDeleteVertexArrays(1, &vao);
+			}
+			};
+
+		// iterate over physics bodies and draw according to type
+		for (auto b : physics.bodies_) {
+			if (!b || !b->enabled) continue;
+			Vec3d center = getBodyPos(b);
+			if (b->colliderType == Physics::COLLIDER_CYLINDER) {
+				drawCylinder(center, b->radius, b->height);
+			}
+			else {
+				drawSphere(center, b->radius);
+			}
+		}
+
+		// restore override uniform
+		if (locUse >= 0) glUniform1i(locUse, 0);
+	}
+
+	// draw gizmos, etc. (existing code continues)
 	if (selectedObject) {
 		glBindVertexArray(axisVAO);
 
@@ -595,14 +1359,14 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 		for (size_t i = 0; i < lights.size(); ++i) {
 			// draw point at light position
 			Mat4 model = translate(Mat4(1.0f), lights[i].position);
-			glUniformMatrix4fv(glGetUniformLocation(activeProgram,"model"),1,GL_FALSE, model.value_ptr());
-			glUniform3fv(glGetUniformLocation(activeProgram,"overrideColor"),1,&lights[i].color[0]);
-			glUniform1i(glGetUniformLocation(activeProgram,"useOverrideColor"), 1);
+			glUniformMatrix4fv(glGetUniformLocation(activeProgram, "model"), 1, GL_FALSE, model.value_ptr());
+			glUniform3fv(glGetUniformLocation(activeProgram, "overrideColor"), 1, &lights[i].color[0]);
+			glUniform1i(glGetUniformLocation(activeProgram, "useOverrideColor"), 1);
 
 			// ensure the lightVBO contains a single point when drawing point
 			Vec3d pt = lights[i].position;
 			glBindBuffer(GL_ARRAY_BUFFER, lightVBO);
-			glBufferData(GL_ARRAY_BUFFER, sizeof(Vec3d), &Vec3d(0.0f,0.0f,0.0f), GL_DYNAMIC_DRAW);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(Vec3d), &Vec3d(0.0f, 0.0f, 0.0f), GL_DYNAMIC_DRAW);
 			// draw point (will be transformed by model uniform)
 			if ((int)i == selectedLightIndex) glPointSize(14.0f);
 			glDrawArrays(GL_POINTS, 0, 1);
@@ -617,13 +1381,13 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 
 			// Because the shader multiplies by model, we set model to identity for world-space line verts
 			Mat4 identity = Mat4(1.0f);
-			glUniformMatrix4fv(glGetUniformLocation(activeProgram,"model"),1,GL_FALSE, identity.value_ptr());
+			glUniformMatrix4fv(glGetUniformLocation(activeProgram, "model"), 1, GL_FALSE, identity.value_ptr());
 
 			glBindBuffer(GL_ARRAY_BUFFER, lightVBO);
 			glBufferData(GL_ARRAY_BUFFER, sizeof(linePts), linePts, GL_DYNAMIC_DRAW);
 
 			glEnableVertexAttribArray(0);
-			glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,sizeof(Vec3d),(void*)0);
+			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vec3d), (void*)0);
 
 			glUniform1i(glGetUniformLocation(activeProgram, "useOverrideColor"), 1);
 			glUniform3fv(glGetUniformLocation(activeProgram, "overrideColor"), 1, &lights[i].color[0]);
@@ -631,15 +1395,16 @@ void SceneManager::render(GLuint shaderProgram, const Mat4& view, const Mat4& pr
 			glDrawArrays(GL_LINES, 0, 2);
 
 			// restore VBO to single point  (so next point draw works)
-			Vec3d origin(0.0f,0.0f,0.0f);
+			Vec3d origin(0.0f, 0.0f, 0.0f);
 			glBindBuffer(GL_ARRAY_BUFFER, lightVBO);
 			glBufferData(GL_ARRAY_BUFFER, sizeof(Vec3d), &origin, GL_DYNAMIC_DRAW);
 		}
-		glUniform1i(glGetUniformLocation(activeProgram,"useOverrideColor"), 0);
+		glUniform1i(glGetUniformLocation(activeProgram, "useOverrideColor"), 0);
 		glPointSize(1.0f);
 		glBindVertexArray(0);
 	}
 }
+
 Object* SceneManager::pickObject(const Vec3d& rayOrigin, const Vec3d& rayDir) {
 	float bestDist = FLT_MAX;
 	Object* picked = nullptr;
@@ -647,6 +1412,7 @@ Object* SceneManager::pickObject(const Vec3d& rayOrigin, const Vec3d& rayDir) {
 	for (size_t oi = 0; oi < objects.size(); ++oi) {
 		Object* obj = objects[oi];
 		if (!obj) continue;
+		if (obj->type == "World") continue;
 		if (obj->indices.size() < 3 || obj->vertices.size() == 0) continue;
 
 		// Transform ray into object local space
@@ -681,16 +1447,15 @@ Object* SceneManager::pickObject(const Vec3d& rayOrigin, const Vec3d& rayDir) {
 	return picked;
 }
 
-
 void SceneManager::initGrid(int gridSize, float spacing) {
 	std::vector<Vec3d> gridVertices;
 
 	for (int i = -gridSize; i <= gridSize; i++) {
 		gridVertices.push_back(Vec3d(i * spacing, 0.0f, -gridSize * spacing));
-		gridVertices.push_back(Vec3d(i * spacing, 0.0f,  gridSize * spacing));
+		gridVertices.push_back(Vec3d(i * spacing, 0.0f, gridSize * spacing));
 
 		gridVertices.push_back(Vec3d(-gridSize * spacing, 0.0f, i * spacing));
-		gridVertices.push_back(Vec3d( gridSize * spacing, 0.0f, i * spacing));
+		gridVertices.push_back(Vec3d(gridSize * spacing, 0.0f, i * spacing));
 	}
 
 	gridVertexCount = gridVertices.size();
@@ -701,7 +1466,7 @@ void SceneManager::initGrid(int gridSize, float spacing) {
 	glBindVertexArray(gridVAO);
 	glBindBuffer(GL_ARRAY_BUFFER, gridVBO);
 	glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(Vec3d),
-	gridVertices.data(), GL_STATIC_DRAW);
+		gridVertices.data(), GL_STATIC_DRAW);
 
 	glEnableVertexAttribArray(0);
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vec3d), (void*)0);
@@ -738,6 +1503,18 @@ void SceneManager::saveScene(const std::string& path) {
 		o["rotation"] = rotArr;
 		o["scale"] = sclArr;
 		o["texturePath"] = obj->texturePath;
+		// persist collision flag (default true)
+		o["collision"] = obj->collisionEnabled;
+		o["isStatic"] = obj->isStatic;
+		
+		int parentIdx = -1;
+		if (obj->parent) {
+			for (size_t pi = 0; pi < objects.size(); ++pi) {
+				if (objects[pi] == obj->parent) { parentIdx = (int)pi; break; }
+			}
+		}
+		o["parent"] = parentIdx;
+
 		j["objects"].push_back(o);
 	}
 
@@ -754,6 +1531,32 @@ void SceneManager::saveScene(const std::string& path) {
 		j["lights"].push_back(l);
 	}
 
+	// skybox
+	json sky;
+	if (skyboxMode == SkyboxMode::None) sky["mode"] = "None";
+	else if (skyboxMode == SkyboxMode::Color) {
+		sky["mode"] = "Color";
+		sky["color"] = { skyboxColor.x, skyboxColor.y, skyboxColor.z };
+	} else if (skyboxMode == SkyboxMode::Cubemap) {
+		sky["mode"] = "Cubemap";
+		sky["cubemapPaths"] = skyboxCubemapPaths;
+	}
+	j["skybox"] = sky;
+
+	json world;
+	world["gravity"] = { physics.gravity.x, physics.gravity.y, physics.gravity.z };
+	world["enabled"] = physics.enabled;
+	world["restitution"] = physics.restitution;
+	world["friction"] = physics.friction;
+	world["positionalCorrection"] = physics.positionalCorrection;
+	j["world"] = world;
+
+	json settings;
+	settings["drawPlayerModel"] = drawPlayerModel;
+	settings["drawColliders"] = drawColliders;
+	j["settings"] = settings;
+
+	// ... existing file write code ...
 	std::ofstream file(path);
 	if (file.is_open()) {
 		file << j.dump(4);
@@ -784,6 +1587,9 @@ void SceneManager::loadScene(const std::string& path) {
 		return;
 	}
 
+	std::vector<int> parentIdxs;
+	parentIdxs.reserve(j["objects"].size());
+
 	for (size_t ji = 0; ji < j["objects"].size(); ++ji) {
 		const json& objJson = j["objects"][ji];
 		std::string type = objJson.value("type", "Cube");
@@ -800,6 +1606,9 @@ void SceneManager::loadScene(const std::string& path) {
 			scl = Vec3d(objJson["scale"][0], objJson["scale"][1], objJson["scale"][2]);
 		}
 		std::string texPath = objJson.value("texturePath", "");
+		bool collision = objJson.value("collision", true);
+		bool isStatic = objJson.value("isStatic", false);
+		int parentIdx = objJson.value("parent", -1);
 
 		Object* o = new Object();
 		o->name = name;
@@ -811,11 +1620,29 @@ void SceneManager::loadScene(const std::string& path) {
 		o->rotation = rot;
 		o->scale    = scl;
 
+		o->collisionEnabled = collision;
+		o->isStatic = isStatic;
+
 		if (!texPath.empty()) {
 			o->texture(texPath);
 		}
 
 		objects.push_back(o);
+		parentIdxs.push_back(parentIdx);
+
+		// create physics body that matches the current transform/scale/type
+		recreatePhysicsBody(o);
+	}
+
+	// Apply parent relationships
+	for (size_t i = 0; i < parentIdxs.size(); ++i) {
+		int p = parentIdxs[i];
+		if (p >= 0 && p < (int)objects.size()) {
+			setParent(objects[i], objects[p]);
+		}
+		else {
+			setParent(objects[i], nullptr);
+		}
 	}
 
 	if (j.find("lights") == j.end() || !j["lights"].is_array()) {
@@ -861,4 +1688,99 @@ void SceneManager::loadScene(const std::string& path) {
 		sh->farP = 60.0f;
 		lightShadows.push_back(sh);
 	}
+
+	// After loading objects and lights, load skybox if present
+	if (j.find("skybox") != j.end() && j["skybox"].is_object()) {
+		const json& sky = j["skybox"];
+		std::string mode = sky.value("mode", "None");
+		if (mode == "Color") {
+			if (sky.find("color") != sky.end() && sky["color"].size() == 3) {
+				Vec3d c = Vec3d((float)sky["color"][0], (float)sky["color"][1], (float)sky["color"][2]);
+				setSkyboxColor(c);
+			}
+		} else if (mode == "Cubemap") {
+			if (sky.find("cubemapPaths") != sky.end() && sky["cubemapPaths"].is_array() && sky["cubemapPaths"].size() == 6) {
+				std::vector<std::string> faces;
+				for (int i = 0; i < 6; ++i) faces.push_back(sky["cubemapPaths"][i]);
+				setSkyboxCubemap(faces);
+			}
+		} else {
+			clearSkybox();
+		}
+	} else {
+		clearSkybox();
+	}
+
+	if (j.find("world") != j.end() && j["world"].is_object()) {
+		const json& world = j["world"];
+		if (world.find("gravity") != j.end() && world["gravity"].size() == 3) {
+			physics.setGravity(Vec3d(world["gravity"][0], world["gravity"][1], world["gravity"][2]));
+		}
+		if (world.find("enabled") != j.end()) physics.setEnabled(world["enabled"]);
+		if (world.find("restitution") != j.end()) physics.setRestitution(world["restitution"]);
+		if (world.find("friction") != j.end()) physics.setFriction(world["friction"]);
+		if (world.find("positionalCorrection") != j.end()) physics.setPositionalCorrection(world["positionalCorrection"]);
+	}
+
+	if (j.find("settings") != j.end() && j["settings"].is_object()) {
+		const json& settings = j["settings"];
+		if (settings.find("drawPlayerModel") != j.end()) drawPlayerModel = settings["drawPlayerModel"];
+		if (settings.find("drawColliders") != j.end()) drawColliders = settings["drawColliders"];
+	}
+}
+
+void SceneManager::recreatePhysicsBody(Object* obj) {
+	if (!obj) return;
+
+	// remove existing body if any
+	if (obj->physicsBody) {
+		physics.removeBody(obj);
+		obj->physicsBody = nullptr;
+	}
+
+	// compute radius using current object (boundingRadius uses scale)
+	double r = obj->boundingRadius();
+
+	// choose collider type based on object type
+	int collider = Physics::COLLIDER_SPHERE;
+	double height = 1.0;
+	bool makeStatic = false;
+
+	if (obj->type == "Plane") {
+		collider = Physics::COLLIDER_PLANE;
+		height = 0.0;
+		obj->isStatic = true;
+	} else if (obj->type == "Cylinder") {
+		collider = Physics::COLLIDER_CYLINDER;
+		height = std::max(0.1, obj->scale.y * 2.0);
+	} else if (obj->type == "Sphere") {
+		collider = Physics::COLLIDER_SPHERE;
+		height = 1.0;
+	} else {
+		collider = Physics::COLLIDER_SPHERE;
+		height = 1.0;
+	}
+
+	// world position from composed model matrix
+	Vec3d worldPos = obj->getModelMatrix().transformPoint(Vec3d(0.0f, 0.0f, 0.0f));
+
+	Physics::RigidBody* rb = physics.createBody(obj, obj->isStatic, obj->isStatic ? 0.0 : 1.0, r, worldPos, collider, height);
+	if (rb) {
+		rb->enabled = obj->collisionEnabled;
+		rb->isStatic = obj->isStatic;
+		if (collider == Physics::COLLIDER_PLANE) rb->planeY = obj->position.y;
+		if (makeStatic) {
+			rb->mass = 1e12;
+			if (rb->owner) rb->owner->position = obj->position;
+			else rb->position = obj->position;
+		} else {
+			if (rb->owner) rb->position = rb->owner->position;
+		}
+	}
+	obj->physicsBody = rb;
+
+	std::cerr << "[SceneManager] recreatePhysicsBody: obj='" << obj->name
+			  << "' type='" << obj->type
+			  << "' worldPos=(" << worldPos.x << "," << worldPos.y << "," << worldPos.z << ")"
+			  << " radius=" << r << " height=" << height << std::endl;
 }
