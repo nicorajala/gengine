@@ -1,6 +1,8 @@
 GENGINE
 ======
 
+NOTICE: Not in active development anymore lol.
+
 GENGINE (Not final name hopefully) is a compact, cross-platform game engine and editor that aims for a 2010s AAA look and feel. It is currently very primitive, but in very active development.
 
 The project bundles an editor UI, a small runtime, and a simple scene format so you can prototype scenes, shaders and game logic fast.
